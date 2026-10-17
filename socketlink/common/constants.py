@@ -1,0 +1,146 @@
+"""Project-wide constants for SocketLink.
+
+OWNER: Sude
+RULE: Never hard-code any of these values in another module. Import them from here.
+      Changing a value here requires a PR approved by the owner, because every
+      module depends on it.
+"""
+
+from enum import Enum, IntEnum
+
+# --------------------------------------------------------------------------- #
+# Application
+# --------------------------------------------------------------------------- #
+APP_NAME = "SocketLink"
+APP_VERSION = "0.1.0"
+ENCODING = "utf-8"
+
+# --------------------------------------------------------------------------- #
+# Network defaults
+# --------------------------------------------------------------------------- #
+DEFAULT_HOST = "127.0.0.1"   # localhost; use "0.0.0.0" on the server to accept LAN clients
+DEFAULT_PORT = 5050          # NOT 5000: macOS AirPlay uses 5000
+MAX_CLIENTS = 50
+LISTEN_BACKLOG = 10
+
+# --------------------------------------------------------------------------- #
+# Protocol (see docs/PROTOCOL.md)
+# --------------------------------------------------------------------------- #
+PROTOCOL_MAGIC = b"SL"
+PROTOCOL_VERSION = 1
+HEADER_FORMAT = "!2sBBBBIIII"  # magic, version, type, flags, reserved, seq, ack, length, checksum
+HEADER_SIZE = 22               # struct.calcsize(HEADER_FORMAT)
+MAX_PAYLOAD_SIZE = 60_000      # bytes; must stay below the UDP datagram limit (~65 507)
+FILE_CHUNK_SIZE = 1024         # bytes of file data per FILE_CHUNK packet
+FILE_CHUNK_PREFIX_FORMAT = "!II"  # transfer_id, chunk_index
+FILE_CHUNK_PREFIX_SIZE = 8
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 16
+USERNAME_PATTERN = r"^[A-Za-z0-9_]{3,16}$"
+MAX_CHAT_LENGTH = 2000  # characters
+
+# --------------------------------------------------------------------------- #
+# Timing (seconds unless the name says otherwise)
+# --------------------------------------------------------------------------- #
+SOCKET_TIMEOUT = 1.0         # recv/accept timeout so threads can check their stop flag
+CONNECT_TIMEOUT = 5.0
+HEARTBEAT_INTERVAL = 5.0     # client sends PING this often
+CONNECTION_TIMEOUT = 15.0    # no traffic for this long -> connection considered dead
+RECONNECT_DELAYS = (1.0, 2.0, 4.0, 8.0)  # back-off between reconnect attempts
+GUI_POLL_INTERVAL_MS = 50    # GUI reads the event queue this often
+STATS_UPDATE_INTERVAL = 1.0  # STATS_UPDATED event period
+
+# --------------------------------------------------------------------------- #
+# Reliable UDP (see docs/PROTOCOL.md section 6)
+# --------------------------------------------------------------------------- #
+RETRANSMIT_TIMEOUT = 0.5     # seconds before an un-ACKed packet is resent
+MAX_RETRIES = 8              # after this many resends the connection is declared dead
+DEFAULT_WINDOW_SIZE = 4      # Go-Back-N window; 1 == Stop-and-Wait
+MAX_WINDOW_SIZE = 32
+MAX_SIMULATED_LOSS = 0.5     # GUI slider upper limit (50 %)
+MAX_SIMULATED_DELAY_MS = 1000
+
+# --------------------------------------------------------------------------- #
+# Paths (relative to the folder the app is started from; all git-ignored)
+# --------------------------------------------------------------------------- #
+LOG_DIR = "logs"
+LOG_FILE = "socketlink.log"
+DOWNLOAD_DIR = "downloads"
+RESULTS_DIR = "results"
+
+
+# --------------------------------------------------------------------------- #
+# Enums
+# --------------------------------------------------------------------------- #
+class MessageType(IntEnum):
+    """Value of the `type` byte in the packet header. Never renumber."""
+
+    HELLO = 1
+    WELCOME = 2
+    CHAT = 3
+    ACK = 4
+    PING = 5
+    PONG = 6
+    USER_LIST = 7
+    FILE_START = 8
+    FILE_CHUNK = 9
+    FILE_END = 10
+    ERROR = 11
+    BYE = 12
+
+
+class PacketFlag(IntEnum):
+    """Bit flags for the `flags` byte. Combine with |."""
+
+    NONE = 0
+    ACK_REQUIRED = 1 << 0   # set by the reliable UDP transport
+    RETRANSMISSION = 1 << 1  # set on a resent packet (for statistics only)
+
+
+class ErrorCode(str, Enum):
+    """`code` field of an ERROR payload."""
+
+    BAD_CHECKSUM = "BAD_CHECKSUM"
+    MALFORMED_PACKET = "MALFORMED_PACKET"
+    VERSION_MISMATCH = "VERSION_MISMATCH"
+    NOT_AUTHENTICATED = "NOT_AUTHENTICATED"
+    INVALID_USERNAME = "INVALID_USERNAME"
+    USERNAME_TAKEN = "USERNAME_TAKEN"
+    UNKNOWN_USER = "UNKNOWN_USER"
+    PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE"
+    SERVER_FULL = "SERVER_FULL"
+    FILE_REJECTED = "FILE_REJECTED"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class TransportMode(str, Enum):
+    TCP = "tcp"
+    UDP = "udp"
+
+
+class ConnectionState(str, Enum):
+    """Client connection states (State pattern, see docs/ARCHITECTURE.md)."""
+
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+    DISCONNECTING = "disconnecting"
+
+
+# Allowed state transitions. Any other transition raises InvalidStateError.
+STATE_TRANSITIONS: dict[ConnectionState, frozenset[ConnectionState]] = {
+    ConnectionState.DISCONNECTED: frozenset({ConnectionState.CONNECTING}),
+    ConnectionState.CONNECTING: frozenset(
+        {ConnectionState.CONNECTED, ConnectionState.DISCONNECTED}
+    ),
+    ConnectionState.CONNECTED: frozenset(
+        {ConnectionState.DISCONNECTING, ConnectionState.RECONNECTING}
+    ),
+    ConnectionState.RECONNECTING: frozenset(
+        {ConnectionState.CONNECTED, ConnectionState.DISCONNECTED}
+    ),
+    ConnectionState.DISCONNECTING: frozenset({ConnectionState.DISCONNECTED}),
+}

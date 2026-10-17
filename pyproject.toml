@@ -1,0 +1,21 @@
+[project]
+name = "socketlink"
+version = "0.1.0"
+description = "COME413 Computer Networks course project: socket programming in Python"
+requires-python = ">=3.10"
+dependencies = []  # standard library only
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 30
+markers = [
+    "integration: starts real sockets on localhost",
+    "slow: load tests and benchmarks",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B"]

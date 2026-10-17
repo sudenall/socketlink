@@ -1,0 +1,25 @@
+# Replace @username placeholders with real GitHub usernames (Sude does this on day 1).
+# GitHub automatically requests a review from the owner when these paths change.
+
+*                                   @sude-github
+/socketlink/common/protocol.py      @sude-github
+/socketlink/common/transport.py     @sude-github
+/socketlink/common/constants.py     @sude-github
+/socketlink/common/events.py        @sude-github
+/socketlink/common/exceptions.py    @sude-github
+/socketlink/common/stats.py         @sude-github @yigit-github
+/socketlink/common/config.py        @nevin-github
+/socketlink/common/logger.py        @nevin-github
+/socketlink/server/                 @yusuf-github
+/socketlink/client/                 @hamit-github
+/socketlink/reliability/            @yigit-github
+/socketlink/transfer/               @tina-github
+/socketlink/gui/client_gui.py       @ilayda-github
+/socketlink/gui/server_gui.py       @tina-github
+/socketlink/gui/theme.py            @ilayda-github @tina-github
+/tests/                             @meryem-github
+/benchmarks/                        @meryem-github
+/docs/                              @nevin-github
+/docs/PROTOCOL.md                   @sude-github
+/docs/ARCHITECTURE.md               @sude-github
+/README.md                          @sude-github @nevin-github

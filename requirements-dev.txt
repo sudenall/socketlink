@@ -1,0 +1,6 @@
+# Runtime needs ONLY the Python standard library (no pip install required to run the app).
+# These are for development / testing:
+pytest>=8.0
+pytest-timeout>=2.3
+ruff>=0.6
+psutil>=5.9   # benchmarks only (CPU / memory)
