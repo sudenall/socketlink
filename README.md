@@ -343,7 +343,7 @@ Her kartta: kod görevleri (checklist), rapor görevleri, kimden ne bekliyorsun,
 **Literatür:** network simulation / visualization tools for education
 **Teslim ettiğin:** ekran görüntüleri → Nevin, Meryem · **Bekledığın:** Hamit (`ChatClient`)
 **Kod eşi:** Tina · **Rapor eşi:** Yusuf
-
+<!-- okudum: İlayda Yalçınöz, 18.10.2026 -->
 ### 🔴 Tina — Sunucu Paneli & Dosya Transferi
 
 **Kod**
