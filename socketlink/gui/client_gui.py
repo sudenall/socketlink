@@ -21,10 +21,11 @@ Required widgets (README section 7, İlayda's checklist):
 
 from __future__ import annotations
 
+import queue
 import tkinter as tk
 
-from socketlink.common.constants import APP_NAME
-from socketlink.common.events import Event, EventBus
+from socketlink.common.constants import APP_NAME, GUI_POLL_INTERVAL_MS, ConnectionState
+from socketlink.common.events import Event, EventBus, EventType
 from socketlink.gui import theme
 
 
@@ -33,6 +34,7 @@ class ClientApp:
         self.root = root
         self.event_bus = event_bus or EventBus()
         self.events = self.event_bus.subscribe_queue()
+        self._poll_after_id: str | None = None
 
     def build_ui(self) -> None:
         """Build the initial client window and disconnected status panel."""
@@ -67,17 +69,45 @@ class ClientApp:
             fg=theme.COLOR_DISCONNECTED,
         )
         self.status_label.pack(anchor="w")
+        self._poll_events()
 
     def _poll_events(self) -> None:
         """Drain self.events without blocking (get_nowait loop), call _handle_event,
         then reschedule with root.after(GUI_POLL_INTERVAL_MS, self._poll_events)."""
-        raise NotImplementedError("TODO(İlayda)")
+        try:
+            while True:
+                event = self.events.get_nowait()
+                self._handle_event(event)
+        except queue.Empty:
+            pass
+        self._poll_after_id = self.root.after(GUI_POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, event: Event) -> None:
-        raise NotImplementedError("TODO(İlayda)")
+        """Update the existing status label for connection lifecycle events."""
+        if event.type == EventType.STATE_CHANGED:
+            state = ConnectionState(event.data["new"])
+        elif event.type == EventType.CONNECTED:
+            state = ConnectionState.CONNECTED
+        elif event.type == EventType.DISCONNECTED:
+            state = ConnectionState.DISCONNECTED
+        else:
+            # Other event types will be handled when their panels are implemented.
+            return
+
+        colors = {
+            ConnectionState.DISCONNECTED: theme.COLOR_DISCONNECTED,
+            ConnectionState.CONNECTING: theme.COLOR_CONNECTING,
+            ConnectionState.CONNECTED: theme.COLOR_CONNECTED,
+            ConnectionState.RECONNECTING: theme.COLOR_CONNECTING,
+            ConnectionState.DISCONNECTING: theme.COLOR_CONNECTING,
+        }
+        self.status_label.configure(text=state.value.capitalize(), fg=colors[state])
 
     def on_close(self) -> None:
         """Disconnect cleanly, then root.destroy()."""
+        if self._poll_after_id is not None:
+            self.root.after_cancel(self._poll_after_id)
+            self._poll_after_id = None
         self.root.destroy()
 
 
