@@ -1,0 +1,89 @@
+<mxfile host="Electron" modified="2026-10-18T20:00:00.000Z" agent="Mozilla/5.0" version="21.6.8" type="device">
+  <diagram id="HLD2" name="Detailed Network Diagram">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="900" background="#ffffff" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- CLIENT CONTAINER -->
+        <mxCell id="clientBox" value="CLIENT PROCESS" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=14;fontStyle=1;startSize=30;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="460" height="660" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c_gui" value="ClientApp (Tkinter Main Thread)&#xa;Panels: Chat, Connect, Users, Stats, Sim&#xa;Polling: root.after(50 ms, drain_queue)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="clientBox">
+          <mxGeometry x="40" y="50" width="380" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c_bus" value="EventBus (Observer Pattern)&#xa;subscribe_queue() -&gt; Queue[Event]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3f4f6;strokeColor=#9ca3af;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="clientBox">
+          <mxGeometry x="40" y="140" width="380" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c_core" value="ChatClient Core&#xa;State Pattern: DISCONNECTED -&gt; CONNECTING -&gt; CONNECTED&#xa;Methods: connect(), send_chat(), send_file(), disconnect()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="clientBox">
+          <mxGeometry x="40" y="215" width="380" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c_threads" value="Daemon Threads:&#xa;• cli-connect (non-blocking connect)&#xa;• cli-receiver (transport.receive loop)&#xa;• cli-heartbeat (PING every 5s)&#xa;• udp-retransmit (GBN timeout timer)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="clientBox">
+          <mxGeometry x="40" y="310" width="380" height="85" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c_ft" value="FileTransfer Module (Tina)&#xa;FileSender / FileReceiver (CRC32, 1KB chunks)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="clientBox">
+          <mxGeometry x="40" y="420" width="380" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c_transport" value="Transport Layer (Strategy Pattern)&#xa;TcpTransport / ReliableUdpTransport (Go-Back-N, Window=4)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="clientBox">
+          <mxGeometry x="40" y="495" width="380" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c_loss" value="LossSimulator (Yiğit)&#xa;Simulated loss_rate (0..50%) &amp; delay_ms (0..1000ms)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="clientBox">
+          <mxGeometry x="40" y="575" width="380" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- SERVER CONTAINER -->
+        <mxCell id="serverBox" value="SERVER PROCESS" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=14;fontStyle=1;startSize=30;" vertex="1" parent="1">
+          <mxGeometry x="680" y="40" width="460" height="660" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s_gui" value="ServerApp (Tkinter Main Thread - Tina)&#xa;Treeview Client Table, Live Log, Kick Button, Stats Panel&#xa;Polling: root.after(50 ms, drain_queue)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="50" width="380" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s_bus" value="EventBus (Observer Pattern)&#xa;LoggingHandler -> EventType.LOG / CLIENT_JOINED / LEFT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3f4f6;strokeColor=#9ca3af;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="140" width="380" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s_core" value="ChatServer Core (Yusuf)&#xa;State: Active Client Directory (dict[str, ClientHandler] + Lock)&#xa;Methods: start(), stop(), broadcast(), kick(), get_stats()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="215" width="380" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s_threads" value="Daemon Threads:&#xa;• srv-accept (listener.accept() loop)&#xa;• srv-client-&lt;user&gt; (Thread-per-client ClientHandler)&#xa;• srv-watchdog (Checks 15s inactivity timeout)&#xa;• udp-demux (Demultiplexes UDP packets to ClientHandlers)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="310" width="380" height="85" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s_handlers" value="ClientHandler Instances (1 per connected client, up to 50)&#xa;Loops on transport.receive(), handles HELLO, CHAT, BYE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="420" width="380" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s_listener" value="TransportListener (Strategy Pattern)&#xa;TcpListener / ReliableUdpListener (Port 5050)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="495" width="380" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s_loss" value="Server LossSimulator (Reliable UDP Testing)&#xa;Simulates dropped ACKs and data frames" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="575" width="380" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- NETWORK CONNECTOR -->
+        <mxCell id="net_link" value="Socket Link (TCP / Reliable UDP)&#xa;Fixed 22-byte Binary Header + JSON/Binary Payload&#xa;CRC32 Integrity Validation" style="shape=flexArrow;endArrow=classic;startArrow=classic;html=1;rounded=0;fillColor=#f3f4f6;strokeColor=#9ca3af;fontFamily=Times New Roman;fontSize=11;fontStyle=1;align=center;" edge="1" parent="1" source="c_transport" target="s_listener">
+          <mxGeometry width="100" height="100" relative="1" as="geometry">
+            <mxPoint x="530" y="560" as="sourcePoint" />
+            <mxPoint x="650" y="560" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Caption -->
+        <mxCell id="caption2" value="Figure 3.2: Detailed Network and Concurrency Architecture Diagram (HLD-2)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="320" y="730" width="550" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

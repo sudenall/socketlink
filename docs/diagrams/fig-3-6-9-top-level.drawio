@@ -1,0 +1,55 @@
+<mxfile host="Electron" modified="2026-10-18T20:00:00.000Z" agent="Mozilla/5.0" version="21.6.8" type="device">
+  <diagram id="HLD1" name="Top-Level Network Diagram">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" background="#ffffff" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Clients Subgraph -->
+        <mxCell id="client1" value="Client 1 (Alice)&#xa;192.168.1.101:54321&#xa;Tkinter GUI / ChatClient" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="80" y="120" width="180" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="client2" value="Client 2 (Bob)&#xa;192.168.1.102:54322&#xa;Tkinter GUI / ChatClient" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="80" y="240" width="180" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="client3" value="Client N (Carol)&#xa;192.168.1.105:54325&#xa;Tkinter GUI / ChatClient" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="80" y="360" width="180" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Network / Router -->
+        <mxCell id="network" value="LAN / IP Network&#xa;(Switch / Router)&#xa;Simulated Packet Loss &amp; Latency" style="ellipse;shape=cloud;whiteSpace=wrap;html=1;fillColor=#f3f4f6;strokeColor=#9ca3af;fontFamily=Times New Roman;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="380" y="200" width="260" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- Server -->
+        <mxCell id="server" value="SocketLink Server&#xa;0.0.0.0:5050 (DEFAULT_PORT)&#xa;Thread-per-Client Concurrency&#xa;ChatServer &amp; ServerApp (Tina)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="760" y="230" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Connections -->
+        <mxCell id="edge1" value="TCP (Port 5050) /&#xa;Reliable UDP (Port 5050)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.16;entryY=0.35;entryDx=0;entryDy=0;fontFamily=Times New Roman;fontSize=11;" edge="1" parent="1" source="client1" target="network">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="edge2" value="TCP / UDP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.05;entryY=0.55;entryDx=0;entryDy=0;fontFamily=Times New Roman;fontSize=11;" edge="1" parent="1" source="client2" target="network">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="edge3" value="TCP / UDP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.25;entryY=0.8;entryDx=0;entryDy=0;fontFamily=Times New Roman;fontSize=11;" edge="1" parent="1" source="client3" target="network">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="edge4" value="Demultiplexed Streams&#xa;(Up to MAX_CLIENTS=50)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.88;exitY=0.55;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontFamily=Times New Roman;fontSize=11;strokeWidth=2;" edge="1" parent="1" source="network" target="server">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Caption -->
+        <mxCell id="caption" value="Figure 3.1: Top-Level Network Architecture Diagram (HLD-1) for SocketLink" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="250" y="490" width="550" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
