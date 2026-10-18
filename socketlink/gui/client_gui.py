@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from socketlink.common.constants import APP_NAME
 from socketlink.common.events import Event, EventBus
+from socketlink.gui import theme
 
 
 class ClientApp:
@@ -33,7 +35,38 @@ class ClientApp:
         self.events = self.event_bus.subscribe_queue()
 
     def build_ui(self) -> None:
-        raise NotImplementedError("TODO(İlayda)")
+        """Build the initial client window and disconnected status panel."""
+        self.root.title(f"{APP_NAME} - Client")
+        self.root.geometry(theme.CLIENT_WINDOW_SIZE)
+        self.root.configure(bg=theme.COLOR_BG)
+
+        tk.Label(
+            self.root,
+            text=f"{APP_NAME} Client",
+            font=theme.FONT_TITLE,
+            bg=theme.COLOR_BG,
+            fg=theme.COLOR_TEXT,
+        ).pack(anchor="w", padx=theme.PAD, pady=theme.PAD)
+
+        self.connection_panel = tk.LabelFrame(
+            self.root,
+            text="Connection",
+            font=theme.FONT_BOLD,
+            bg=theme.COLOR_PANEL,
+            fg=theme.COLOR_TEXT,
+            padx=theme.PAD,
+            pady=theme.PAD,
+        )
+        self.connection_panel.pack(fill="x", padx=theme.PAD, pady=theme.PAD_SMALL)
+
+        self.status_label = tk.Label(
+            self.connection_panel,
+            text="Disconnected",
+            font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL,
+            fg=theme.COLOR_DISCONNECTED,
+        )
+        self.status_label.pack(anchor="w")
 
     def _poll_events(self) -> None:
         """Drain self.events without blocking (get_nowait loop), call _handle_event,
@@ -45,7 +78,7 @@ class ClientApp:
 
     def on_close(self) -> None:
         """Disconnect cleanly, then root.destroy()."""
-        raise NotImplementedError("TODO(İlayda)")
+        self.root.destroy()
 
 
 def main() -> None:
