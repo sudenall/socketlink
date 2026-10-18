@@ -11,7 +11,6 @@ from socketlink.common.config import ClientConfig, ServerConfig
 from socketlink.common.constants import (
     DEFAULT_HOST,
     DEFAULT_PORT,
-    DEFAULT_WINDOW_SIZE,
     MAX_CLIENTS,
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,

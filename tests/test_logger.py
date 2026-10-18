@@ -6,8 +6,8 @@ OWNER: Nevin
 from __future__ import annotations
 
 import logging
-from logging.handlers import RotatingFileHandler
 import unittest
+from logging.handlers import RotatingFileHandler
 
 from socketlink.common.events import EventBus, EventType
 from socketlink.common.logger import (
@@ -24,7 +24,7 @@ class TestLogger(unittest.TestCase):
         self.assertEqual(log.name, "socketlink.test_module")
 
     def test_rotating_file_handler_configured(self) -> None:
-        log = get_logger("check_handlers")
+        get_logger("check_handlers")
         root = logging.getLogger("socketlink")
         rotating_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
         self.assertGreaterEqual(len(rotating_handlers), 1)
