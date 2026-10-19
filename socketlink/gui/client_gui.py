@@ -24,13 +24,18 @@ from __future__ import annotations
 import queue
 import tkinter as tk
 from datetime import datetime
+from tkinter import ttk
 
 from socketlink.common.config import ClientConfig
 from socketlink.common.constants import (
     APP_NAME,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    DEFAULT_WINDOW_SIZE,
     GUI_POLL_INTERVAL_MS,
+    MAX_SIMULATED_DELAY_MS,
+    MAX_SIMULATED_LOSS,
+    MAX_WINDOW_SIZE,
     ConnectionState,
     TransportMode,
 )
@@ -102,19 +107,28 @@ class ClientApp:
 
         mode_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
         mode_panel.grid(row=3, column=1, sticky="w", pady=theme.PAD_SMALL)
+        mode_style = ttk.Style(self.root)
+        mode_style.configure(
+            "SocketLink.TRadiobutton", font=theme.FONT_NORMAL,
+            background=theme.COLOR_PANEL, foreground=theme.COLOR_TEXT,
+        )
+        mode_style.map(
+            "SocketLink.TRadiobutton",
+            background=[("active", theme.COLOR_PANEL)],
+            foreground=[("active", theme.COLOR_TEXT)],
+        )
+        self.mode_buttons: dict[TransportMode, ttk.Radiobutton] = {}
         for mode in TransportMode:
-            tk.Radiobutton(
+            button = ttk.Radiobutton(
                 mode_panel,
                 text=mode.value.upper(),
                 variable=self.mode_var,
                 value=mode.value,
-                font=theme.FONT_NORMAL,
-                bg=theme.COLOR_PANEL,
-                fg=theme.COLOR_TEXT,
-                activebackground=theme.COLOR_PANEL,
-                activeforeground=theme.COLOR_TEXT,
-                selectcolor=theme.COLOR_PANEL,
-            ).pack(side="left", padx=theme.PAD_SMALL)
+                style="SocketLink.TRadiobutton",
+            )
+            button.state(["!disabled"])
+            button.pack(side="left", padx=theme.PAD_SMALL)
+            self.mode_buttons[mode] = button
 
         button_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
         button_panel.grid(row=4, column=1, sticky="w", pady=theme.PAD_SMALL)
@@ -198,23 +212,92 @@ class ClientApp:
         )
         self.send_button.grid(row=1, column=1, sticky="e",
                               padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self._build_udp_panel()
         self._poll_events()
+
+    def _build_udp_panel(self) -> None:
+        """Build local simulation inputs; no transport is called here."""
+        defaults = ClientConfig()
+        self.loss_percent_var = tk.IntVar(master=self.root, value=int(defaults.loss_rate * 100))
+        self.delay_ms_var = tk.IntVar(master=self.root, value=defaults.delay_ms)
+        self.window_size_var = tk.StringVar(master=self.root, value=str(DEFAULT_WINDOW_SIZE))
+        self.udp_panel = tk.LabelFrame(
+            self.root, text="UDP Simulation", font=theme.FONT_BOLD,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            padx=theme.PAD, pady=theme.PAD_SMALL,
+        )
+        self.udp_panel.pack(fill="x", before=self.chat_panel,
+                            padx=theme.PAD, pady=theme.PAD_SMALL)
+        self.udp_controls: list[tk.Scale | tk.Spinbox] = []
+        for column, (label, variable, maximum) in enumerate((
+            ("Packet Loss (%)", self.loss_percent_var, int(MAX_SIMULATED_LOSS * 100)),
+            ("Delay (ms)", self.delay_ms_var, MAX_SIMULATED_DELAY_MS),
+        )):
+            self.udp_panel.columnconfigure(column, weight=1)
+            tk.Label(
+                self.udp_panel, text=label, font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            ).grid(row=0, column=column, sticky="w", padx=theme.PAD_SMALL)
+            control = tk.Scale(
+                self.udp_panel, from_=0, to=maximum, resolution=1,
+                variable=variable, orient=tk.HORIZONTAL, showvalue=True,
+                font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+                troughcolor=theme.COLOR_BG, activebackground=theme.COLOR_ACCENT,
+                highlightthickness=0,
+            )
+            control.grid(row=1, column=column, sticky="ew", padx=theme.PAD_SMALL)
+            self.udp_controls.append(control)
+        tk.Label(
+            self.udp_panel, text="Window Size (packets)", font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        ).grid(row=0, column=2, sticky="w", padx=theme.PAD_SMALL)
+        self.window_size_spinbox = tk.Spinbox(
+            self.udp_panel, from_=1, to=MAX_WINDOW_SIZE, increment=1,
+            textvariable=self.window_size_var, width=6, font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT, insertbackground=theme.COLOR_TEXT,
+            disabledbackground=theme.COLOR_BG, disabledforeground=theme.COLOR_MUTED,
+        )
+        self.window_size_spinbox.grid(row=1, column=2, sticky="w", padx=theme.PAD_SMALL)
+        self.udp_controls.append(self.window_size_spinbox)
+        self.mode_var.trace_add("write", self._update_udp_controls)
+        self._update_udp_controls()
+
+    def _update_udp_controls(self, *_args: str) -> None:
+        """Enable simulation inputs only while UDP is selected."""
+        state = tk.NORMAL if self.mode_var.get() == TransportMode.UDP.value else tk.DISABLED
+        for control in self.udp_controls:
+            control.configure(state=state)
 
     def _build_client_config(self) -> ClientConfig:
         """Read the form without connecting or calling ClientConfig.validate().
 
-        Only convert the port here; full validation belongs to ClientConfig.
-        Callers should display ValidationError beside the port field.
+        Convert numeric inputs and check control bounds; full configuration
+        validation belongs to ClientConfig.
         """
         try:
             port = int(self.port_var.get())
         except ValueError as exc:
             raise ValidationError("Port must be a whole number.") from exc
+        try:
+            loss_percent = self.loss_percent_var.get()
+            delay_ms = self.delay_ms_var.get()
+            window_size = int(self.window_size_var.get())
+        except (ValueError, tk.TclError) as exc:
+            raise ValidationError("UDP settings must be whole numbers.") from exc
+        if not 0 <= loss_percent <= MAX_SIMULATED_LOSS * 100:
+            raise ValidationError(f"Packet loss must be between 0 and {MAX_SIMULATED_LOSS * 100:g}%.")
+        if not 0 <= delay_ms <= MAX_SIMULATED_DELAY_MS:
+            raise ValidationError(f"Delay must be between 0 and {MAX_SIMULATED_DELAY_MS} ms.")
+        if not 1 <= window_size <= MAX_WINDOW_SIZE:
+            raise ValidationError(f"Window size must be between 1 and {MAX_WINDOW_SIZE}.")
         return ClientConfig(
             host=self.host_var.get().strip(),
             port=port,
             username=self.username_var.get().strip(),
             mode=TransportMode(self.mode_var.get()),
+            loss_rate=loss_percent / 100,
+            delay_ms=delay_ms,
+            window_size=window_size,
         )
 
     def _poll_events(self) -> None:
