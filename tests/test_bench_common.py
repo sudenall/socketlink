@@ -10,6 +10,7 @@ import pytest
 
 from benchmarks.bench_common import (
     Summary,
+    collect,
     run_series,
     summarize,
     summary_columns,
@@ -48,6 +49,19 @@ def test_run_series_calls_measure_repeats_times() -> None:
 def test_run_series_rejects_zero_repeats() -> None:
     with pytest.raises(ValueError):
         run_series(lambda: 1.0, repeats=0)
+
+
+def test_collect_summarizes_each_metric() -> None:
+    values = iter([1.0, 2.0, 3.0])
+
+    def measure() -> dict[str, float]:
+        v = next(values)
+        return {"a": v, "b": v * 10}
+
+    result = collect(measure, repeats=3)
+    assert result["a"].mean == pytest.approx(2.0)
+    assert result["b"].mean == pytest.approx(20.0)
+    assert result["a"].runs == 3
 
 
 def test_summary_columns_names() -> None:
