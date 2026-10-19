@@ -173,6 +173,28 @@ class DisconnectReason(str, Enum):
         return mapping.get(str(getattr(reason, "value", reason)), cls.SERVER_SHUTDOWN)
 
 
+class FileFailReason(str, Enum):
+    """`reason` of FILE_FAILED events (both directions). The ONLY allowed values.
+
+    Values come from the list Tina documented in transfer/file_transfer.py.
+    """
+
+    # upload (FileSender)
+    INVALID_FILE = "invalid_file"          # missing, empty, directory or too large to start
+    READ_ERROR = "read_error"              # the local file could not be read
+    SEND_ERROR = "send_error"              # the transport failed while sending
+    CANCELLED = "cancelled"                # the user cancelled the transfer
+    # download (FileReceiver)
+    FILE_TOO_LARGE = "file_too_large"      # announced size exceeds MAX_FILE_SIZE
+    BAD_PACKET = "bad_packet"              # FILE_* packet with missing/invalid fields
+    BAD_CHUNK = "bad_chunk"                # chunk index out of range or wrong size
+    TRANSFER_ID_CONFLICT = "transfer_id_conflict"  # same (sender, transfer_id) started twice
+    MISSING_CHUNKS = "missing_chunks"      # FILE_END arrived before all chunks
+    CHECKSUM_MISMATCH = "checksum_mismatch"  # whole-file CRC32 differs
+    WRITE_ERROR = "write_error"            # the file could not be written to disk
+    CONNECTION_LOST = "connection_lost"    # the connection died during the transfer
+
+
 class TransportMode(str, Enum):
     TCP = "tcp"
     UDP = "udp"

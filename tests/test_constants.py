@@ -12,6 +12,7 @@ from socketlink.common.constants import (
     ClientErrorCode,
     DisconnectReason,
     ErrorCode,
+    FileFailReason,
 )
 
 
@@ -46,6 +47,14 @@ def test_enum_members_compare_equal_to_their_string_values() -> None:
 
 
 def test_all_vocabulary_enums_use_unique_values() -> None:
-    for enum in (DisconnectReason, ByeReason, ClientErrorCode, ErrorCode):
+    for enum in (DisconnectReason, ByeReason, ClientErrorCode, ErrorCode, FileFailReason):
         values = [m.value for m in enum]
         assert len(values) == len(set(values)), enum.__name__
+
+
+def test_file_fail_reason_values_are_the_documented_set() -> None:
+    assert {r.value for r in FileFailReason} == {
+        "invalid_file", "read_error", "send_error", "cancelled",
+        "file_too_large", "bad_packet", "bad_chunk", "transfer_id_conflict",
+        "missing_chunks", "checksum_mismatch", "write_error", "connection_lost",
+    }
