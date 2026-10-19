@@ -196,3 +196,19 @@ Bu imzalar iskelet dosyalarda tanımlıdır. **İsim, parametre sırası ve dön
 
 ### Olay veri sözleşmesi
 Her olay tipinin `data` sözlüğünde bulunması zorunlu anahtarlar `common/events.py` içindeki `EVENT_DATA_KEYS` tablosundadır. Testler (`Event.validate()`) bunu kontrol eder.
+
+#### `reason` değerleri (DISCONNECTED, CLIENT_LEFT, SERVER_STOPPED)
+Bu üç olayın `reason` alanı **yalnızca** `constants.py`'deki `DisconnectReason` değerlerinden biridir; serbest metin yazılmaz. Neden bağlanılamadığının/reddedildiğinin ayrıntısı ayrı bir `ERROR` olayında gider (`ClientErrorCode` veya `ErrorCode`).
+
+| Değer | Anlamı | Tipik kaynak |
+|---|---|---|
+| `user` | Normal çıkış | kullanıcı Disconnect dedi / sunucu panelinden Stop |
+| `server_shutdown` | Sunucu herkesin bağlantısını kapattı | alınan `BYE server_shutdown` (veya nedeni bilinmeyen BYE) |
+| `kicked_by_admin` | Yönetici atıldı | `BYE kicked_by_admin`, `kick()` |
+| `timeout` | `CONNECTION_TIMEOUT` boyunca sessizlik | sunucu watchdog'u, `BYE timeout` |
+| `connection_lost` | BYE olmadan kopma | reset, EOF, G/Ç hatası |
+| `rejected` | Sunucu HELLO'yu reddetti | `ERROR` paketi (örn. `USERNAME_TAKEN`) |
+| `connect_failed` | Bağlantı kurulamadı | refused, timeout |
+| `internal_error` | Beklenmeyen hata | yakalanan genel istisna |
+
+Alınan BYE'ı çevirmek için `DisconnectReason.from_bye(reason)` kullanılır. `FILE_FAILED` ve `PACKET_CORRUPTED` olaylarının `reason` alanı için ayrı bir sabit listesi henüz yoktur.
