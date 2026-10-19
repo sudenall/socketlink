@@ -211,4 +211,12 @@ Bu üç olayın `reason` alanı **yalnızca** `constants.py`'deki `DisconnectRea
 | `connect_failed` | Bağlantı kurulamadı | refused, timeout |
 | `internal_error` | Beklenmeyen hata | yakalanan genel istisna |
 
-Alınan BYE'ı çevirmek için `DisconnectReason.from_bye(reason)` kullanılır. `FILE_FAILED` ve `PACKET_CORRUPTED` olaylarının `reason` alanı için ayrı bir sabit listesi henüz yoktur.
+Alınan BYE'ı çevirmek için `DisconnectReason.from_bye(reason)` kullanılır.
+
+#### `FILE_FAILED` reason değerleri (`FileFailReason`)
+| Yön | Değerler |
+|---|---|
+| upload (`FileSender`) | `invalid_file`, `read_error`, `send_error`, `cancelled` |
+| download (`FileReceiver`) | `file_too_large`, `bad_packet`, `bad_chunk`, `transfer_id_conflict`, `missing_chunks`, `checksum_mismatch`, `write_error`, `connection_lost` |
+
+`PACKET_CORRUPTED` olayının `reason` alanı `"checksum"` (CRC uyuşmadı) veya `"malformed"` (başlık geçersiz) olur.
