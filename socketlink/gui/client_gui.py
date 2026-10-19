@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import queue
 import tkinter as tk
+from datetime import datetime
 
 from socketlink.common.config import ClientConfig
 from socketlink.common.constants import (
@@ -139,6 +140,64 @@ class ClientApp:
         )
         self.status_label.grid(row=5, column=0, columnspan=2, sticky="w",
                                padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self.chat_panel = tk.LabelFrame(
+            self.root, text="Chat", font=theme.FONT_BOLD,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            padx=theme.PAD, pady=theme.PAD,
+        )
+        self.chat_panel.pack(fill="both", expand=True, padx=theme.PAD, pady=theme.PAD_SMALL)
+        self.chat_panel.rowconfigure(0, weight=1)
+        self.chat_panel.columnconfigure(0, weight=1)
+
+        history_panel = tk.Frame(self.chat_panel, bg=theme.COLOR_PANEL)
+        history_panel.grid(row=0, column=0, sticky="nsew", padx=theme.PAD_SMALL)
+        history_panel.rowconfigure(0, weight=1)
+        history_panel.columnconfigure(0, weight=1)
+        self.message_history = tk.Text(
+            history_panel, height=5, width=40, wrap="word", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        )
+        self.message_history.grid(row=0, column=0, sticky="nsew")
+        self.message_scrollbar = tk.Scrollbar(
+            history_panel, orient="vertical", command=self.message_history.yview,
+        )
+        self.message_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.message_history.configure(yscrollcommand=self.message_scrollbar.set)
+
+        users_panel = tk.LabelFrame(
+            self.chat_panel, text="Recipients / Online users", font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        )
+        users_panel.grid(row=0, column=1, sticky="nsew", padx=theme.PAD_SMALL)
+        self.user_list = tk.Listbox(
+            users_panel, height=5, width=24, exportselection=False,
+            selectmode=tk.SINGLE, font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            selectbackground=theme.COLOR_ACCENT, selectforeground=theme.COLOR_PANEL,
+        )
+        self.user_list.pack(side="left", fill="both", expand=True)
+        user_scrollbar = tk.Scrollbar(
+            users_panel, orient="vertical", command=self.user_list.yview,
+        )
+        user_scrollbar.pack(side="right", fill="y")
+        self.user_list.configure(yscrollcommand=user_scrollbar.set)
+        self.user_list.insert(tk.END, "Everyone")
+        self.user_list.selection_set(0)
+
+        self.message_var = tk.StringVar(master=self.root)
+        self.message_entry = tk.Entry(
+            self.chat_panel, textvariable=self.message_var, font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT, insertbackground=theme.COLOR_TEXT,
+        )
+        self.message_entry.grid(row=1, column=0, sticky="ew",
+                                padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self.send_button = tk.Button(
+            self.chat_panel, text="Send", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            disabledforeground=theme.COLOR_MUTED,
+        )
+        self.send_button.grid(row=1, column=1, sticky="e",
+                              padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
         self._poll_events()
 
     def _build_client_config(self) -> ClientConfig:
@@ -170,7 +229,27 @@ class ClientApp:
         self._poll_after_id = self.root.after(GUI_POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, event: Event) -> None:
-        """Update the existing status label for connection lifecycle events."""
+        """Render queued chat, user-list and connection events on the Tk thread."""
+        if event.type == EventType.MESSAGE_RECEIVED:
+            timestamp = datetime.fromtimestamp(event.data["timestamp"]).strftime("%H:%M:%S")
+            recipient = event.data["to"]
+            audience = "Everyone" if recipient is None else recipient
+            line = f"[{timestamp}] {event.data['from']} -> {audience}: {event.data['text']}\n"
+            self.message_history.configure(state=tk.NORMAL)
+            try:
+                self.message_history.insert(tk.END, line)
+                self.message_history.see(tk.END)
+            finally:
+                self.message_history.configure(state=tk.DISABLED)
+            return
+        if event.type == EventType.USER_LIST_UPDATED:
+            selection = self.user_list.curselection()
+            selected = self.user_list.get(selection[0]) if selection else "Everyone"
+            users = ["Everyone", *event.data["users"]]
+            self.user_list.delete(0, tk.END)
+            self.user_list.insert(tk.END, *users)
+            self.user_list.selection_set(users.index(selected) if selected in users else 0)
+            return
         if event.type == EventType.STATE_CHANGED:
             state = ConnectionState(event.data["new"])
         elif event.type == EventType.CONNECTED:
