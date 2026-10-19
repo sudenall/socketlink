@@ -57,6 +57,8 @@ class EventType(str, Enum):
 
 
 # Required keys of Event.data for each EventType (the contract between core and GUI).
+# `reason` of DISCONNECTED, CLIENT_LEFT and SERVER_STOPPED must be a DisconnectReason value
+# (constants.py); publish `DisconnectReason.X.value`, never a free-form string.
 EVENT_DATA_KEYS: dict[EventType, tuple[str, ...]] = {
     EventType.CONNECTED: ("host", "port", "mode", "username", "client_id"),
     EventType.DISCONNECTED: ("reason",),
