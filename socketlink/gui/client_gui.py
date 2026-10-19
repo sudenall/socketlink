@@ -285,7 +285,9 @@ class ClientApp:
         except (ValueError, tk.TclError) as exc:
             raise ValidationError("UDP settings must be whole numbers.") from exc
         if not 0 <= loss_percent <= MAX_SIMULATED_LOSS * 100:
-            raise ValidationError(f"Packet loss must be between 0 and {MAX_SIMULATED_LOSS * 100:g}%.")
+            raise ValidationError(
+                f"Packet loss must be between 0 and {MAX_SIMULATED_LOSS * 100:g}%."
+            )
         if not 0 <= delay_ms <= MAX_SIMULATED_DELAY_MS:
             raise ValidationError(f"Delay must be between 0 and {MAX_SIMULATED_DELAY_MS} ms.")
         if not 1 <= window_size <= MAX_WINDOW_SIZE:
