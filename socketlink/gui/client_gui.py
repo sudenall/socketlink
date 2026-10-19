@@ -24,8 +24,17 @@ from __future__ import annotations
 import queue
 import tkinter as tk
 
-from socketlink.common.constants import APP_NAME, GUI_POLL_INTERVAL_MS, ConnectionState
+from socketlink.common.config import ClientConfig
+from socketlink.common.constants import (
+    APP_NAME,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    GUI_POLL_INTERVAL_MS,
+    ConnectionState,
+    TransportMode,
+)
 from socketlink.common.events import Event, EventBus, EventType
+from socketlink.common.exceptions import ValidationError
 from socketlink.gui import theme
 
 
@@ -37,7 +46,7 @@ class ClientApp:
         self._poll_after_id: str | None = None
 
     def build_ui(self) -> None:
-        """Build the initial client window and disconnected status panel."""
+        """Build the connection form without enabling network operations."""
         self.root.title(f"{APP_NAME} - Client")
         self.root.geometry(theme.CLIENT_WINDOW_SIZE)
         self.root.configure(bg=theme.COLOR_BG)
@@ -60,6 +69,66 @@ class ClientApp:
             pady=theme.PAD,
         )
         self.connection_panel.pack(fill="x", padx=theme.PAD, pady=theme.PAD_SMALL)
+        self.connection_panel.columnconfigure(1, weight=1)
+
+        self.host_var = tk.StringVar(master=self.root, value=DEFAULT_HOST)
+        self.port_var = tk.StringVar(master=self.root, value=str(DEFAULT_PORT))
+        self.username_var = tk.StringVar(master=self.root)
+        self.mode_var = tk.StringVar(master=self.root, value=TransportMode.TCP.value)
+
+        for row, (label, variable) in enumerate((
+            ("Host", self.host_var),
+            ("Port", self.port_var),
+            ("Username", self.username_var),
+        )):
+            tk.Label(
+                self.connection_panel,
+                text=label,
+                font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL,
+                fg=theme.COLOR_TEXT,
+            ).grid(row=row, column=0, sticky="w", padx=theme.PAD_SMALL,
+                   pady=theme.PAD_SMALL)
+            tk.Entry(
+                self.connection_panel,
+                textvariable=variable,
+                font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL,
+                fg=theme.COLOR_TEXT,
+                insertbackground=theme.COLOR_TEXT,
+            ).grid(row=row, column=1, sticky="ew", padx=theme.PAD_SMALL,
+                   pady=theme.PAD_SMALL)
+
+        mode_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
+        mode_panel.grid(row=3, column=1, sticky="w", pady=theme.PAD_SMALL)
+        for mode in TransportMode:
+            tk.Radiobutton(
+                mode_panel,
+                text=mode.value.upper(),
+                variable=self.mode_var,
+                value=mode.value,
+                font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL,
+                fg=theme.COLOR_TEXT,
+                activebackground=theme.COLOR_PANEL,
+                activeforeground=theme.COLOR_TEXT,
+                selectcolor=theme.COLOR_PANEL,
+            ).pack(side="left", padx=theme.PAD_SMALL)
+
+        button_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
+        button_panel.grid(row=4, column=1, sticky="w", pady=theme.PAD_SMALL)
+        self.connect_button = tk.Button(
+            button_panel, text="Connect", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            disabledforeground=theme.COLOR_MUTED,
+        )
+        self.connect_button.pack(side="left", padx=theme.PAD_SMALL)
+        self.disconnect_button = tk.Button(
+            button_panel, text="Disconnect", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            disabledforeground=theme.COLOR_MUTED,
+        )
+        self.disconnect_button.pack(side="left", padx=theme.PAD_SMALL)
 
         self.status_label = tk.Label(
             self.connection_panel,
@@ -68,8 +137,26 @@ class ClientApp:
             bg=theme.COLOR_PANEL,
             fg=theme.COLOR_DISCONNECTED,
         )
-        self.status_label.pack(anchor="w")
+        self.status_label.grid(row=5, column=0, columnspan=2, sticky="w",
+                               padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
         self._poll_events()
+
+    def _build_client_config(self) -> ClientConfig:
+        """Read the form without connecting or calling ClientConfig.validate().
+
+        Only convert the port here; full validation belongs to ClientConfig.
+        Callers should display ValidationError beside the port field.
+        """
+        try:
+            port = int(self.port_var.get())
+        except ValueError as exc:
+            raise ValidationError("Port must be a whole number.") from exc
+        return ClientConfig(
+            host=self.host_var.get().strip(),
+            port=port,
+            username=self.username_var.get().strip(),
+            mode=TransportMode(self.mode_var.get()),
+        )
 
     def _poll_events(self) -> None:
         """Drain self.events without blocking (get_nowait loop), call _handle_event,
