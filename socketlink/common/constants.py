@@ -115,6 +115,29 @@ class ErrorCode(str, Enum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
+class ClientErrorCode(str, Enum):
+    """`code` of an ERROR *event* raised on the client side. Never sent over the wire.
+
+    Server-sent ERROR packets use `ErrorCode`; these cover failures the client detects
+    itself, so GUIs can map a code to a friendly message instead of a Python class name.
+    """
+
+    CONNECTION_REFUSED = "CONNECTION_REFUSED"  # nobody is listening on host:port
+    CONNECT_TIMEOUT = "CONNECT_TIMEOUT"        # no TCP connection or no WELCOME in time
+    CONNECTION_LOST = "CONNECTION_LOST"        # reset, EOF or heartbeat timeout
+    PROTOCOL_ERROR = "PROTOCOL_ERROR"          # malformed or unexpected packet from the server
+    INVALID_STATE = "INVALID_STATE"            # operation not allowed in this ConnectionState
+
+
+class ByeReason(str, Enum):
+    """`reason` field of a BYE payload (docs/PROTOCOL.md section 4)."""
+
+    CLIENT_QUIT = "client_quit"
+    SERVER_SHUTDOWN = "server_shutdown"
+    KICKED_BY_ADMIN = "kicked_by_admin"
+    TIMEOUT = "timeout"
+
+
 class TransportMode(str, Enum):
     TCP = "tcp"
     UDP = "udp"
