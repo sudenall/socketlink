@@ -6,6 +6,8 @@ RULE: Never hard-code any of these values in another module. Import them from he
       module depends on it.
 """
 
+from __future__ import annotations
+
 from enum import Enum, IntEnum
 
 # --------------------------------------------------------------------------- #
@@ -136,6 +138,39 @@ class ByeReason(str, Enum):
     SERVER_SHUTDOWN = "server_shutdown"
     KICKED_BY_ADMIN = "kicked_by_admin"
     TIMEOUT = "timeout"
+
+
+class DisconnectReason(str, Enum):
+    """`reason` of DISCONNECTED, CLIENT_LEFT and SERVER_STOPPED events.
+
+    The ONLY allowed values for those events (see docs/ARCHITECTURE.md, "Olay veri
+    sozlesmesi"). GUIs map each member to a user-friendly sentence. The detail of why a
+    connection failed or was rejected travels in a separate ERROR event.
+    """
+
+    USER = "user"                        # the user (or admin on server stop) ended it normally
+    SERVER_SHUTDOWN = "server_shutdown"  # the server closed all connections
+    KICKED_BY_ADMIN = "kicked_by_admin"  # an admin removed this client
+    TIMEOUT = "timeout"                  # no traffic for CONNECTION_TIMEOUT
+    CONNECTION_LOST = "connection_lost"  # reset, EOF or I/O error without a BYE
+    REJECTED = "rejected"                # the server refused HELLO (reason in the ERROR event)
+    CONNECT_FAILED = "connect_failed"    # the connection could not be established
+    INTERNAL_ERROR = "internal_error"    # unexpected exception inside SocketLink
+
+    @classmethod
+    def from_bye(cls, reason: str) -> DisconnectReason:
+        """Translate the `reason` of a received BYE payload.
+
+        An unknown or missing BYE reason means the server ended the session, so it maps
+        to SERVER_SHUTDOWN.
+        """
+        mapping = {
+            ByeReason.CLIENT_QUIT.value: cls.USER,
+            ByeReason.SERVER_SHUTDOWN.value: cls.SERVER_SHUTDOWN,
+            ByeReason.KICKED_BY_ADMIN.value: cls.KICKED_BY_ADMIN,
+            ByeReason.TIMEOUT.value: cls.TIMEOUT,
+        }
+        return mapping.get(str(getattr(reason, "value", reason)), cls.SERVER_SHUTDOWN)
 
 
 class TransportMode(str, Enum):
