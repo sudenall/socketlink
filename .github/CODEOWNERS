@@ -1,25 +1,24 @@
-# Replace @username placeholders with real GitHub usernames (Sude does this on day 1).
 # GitHub automatically requests a review from the owner when these paths change.
 
-*                                   @sude-github
-/socketlink/common/protocol.py      @sude-github
-/socketlink/common/transport.py     @sude-github
-/socketlink/common/constants.py     @sude-github
-/socketlink/common/events.py        @sude-github
-/socketlink/common/exceptions.py    @sude-github
-/socketlink/common/stats.py         @sude-github @yigit-github
-/socketlink/common/config.py        @nevin-github
-/socketlink/common/logger.py        @nevin-github
-/socketlink/server/                 @yusuf-github
-/socketlink/client/                 @hamit-github
-/socketlink/reliability/            @yigit-github
-/socketlink/transfer/               @tina-github
-/socketlink/gui/client_gui.py       @ilayda-github
-/socketlink/gui/server_gui.py       @tina-github
-/socketlink/gui/theme.py            @ilayda-github @tina-github
-/tests/                             @meryem-github
-/benchmarks/                        @meryem-github
-/docs/                              @nevin-github
-/docs/PROTOCOL.md                   @sude-github
-/docs/ARCHITECTURE.md               @sude-github
-/README.md                          @sude-github @nevin-github
+*                                   @sudenall
+/socketlink/common/protocol.py      @sudenall
+/socketlink/common/transport.py     @sudenall
+/socketlink/common/constants.py     @sudenall
+/socketlink/common/events.py        @sudenall
+/socketlink/common/exceptions.py    @sudenall
+/socketlink/common/stats.py         @sudenall @ygtefe10
+/socketlink/common/config.py        @nevinmalkoc
+/socketlink/common/logger.py        @nevinmalkoc
+/socketlink/server/                 @Yusuflora
+/socketlink/client/                 @hamitiscioglu-cmd
+/socketlink/reliability/            @ygtefe10
+/socketlink/transfer/               @tina83t
+/socketlink/gui/client_gui.py       @ilaydaylcnz
+/socketlink/gui/server_gui.py       @tina83t
+/socketlink/gui/theme.py            @ilaydaylcnz @tina83t
+/tests/                             @meryyem641
+/benchmarks/                        @meryyem641
+/docs/                              @nevinmalkoc
+/docs/PROTOCOL.md                   @sudenall
+/docs/ARCHITECTURE.md               @sudenall
+/README.md                          @sudenall @nevinmalkoc
