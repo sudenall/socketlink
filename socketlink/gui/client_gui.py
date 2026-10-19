@@ -36,7 +36,11 @@ from socketlink.common.constants import (
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,
     MAX_WINDOW_SIZE,
+    ClientErrorCode,
     ConnectionState,
+    DisconnectReason,
+    ErrorCode,
+    FileFailReason,
     TransportMode,
 )
 from socketlink.common.events import Event, EventBus, EventType
@@ -124,7 +128,6 @@ class ClientApp:
                 text=mode.value.upper(),
                 variable=self.mode_var,
                 value=mode.value,
-                style="SocketLink.TRadiobutton",
             )
             button.state(["!disabled"])
             button.pack(side="left", padx=theme.PAD_SMALL)
@@ -154,12 +157,22 @@ class ClientApp:
         )
         self.status_label.grid(row=5, column=0, columnspan=2, sticky="w",
                                padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self.notice_label = tk.Label(
+            self.root, text="", anchor="w", font=theme.FONT_NORMAL,
+            bg=theme.COLOR_BG, fg=theme.COLOR_TEXT,
+        )
+        self.notice_label.pack(fill="x", padx=theme.PAD)
+        self.notice_label.bind(
+            "<Configure>", lambda event: self.notice_label.configure(wraplength=event.width)
+        )
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=theme.PAD, pady=theme.PAD_SMALL)
         self.chat_panel = tk.LabelFrame(
-            self.root, text="Chat", font=theme.FONT_BOLD,
+            self.notebook, text="Chat", font=theme.FONT_BOLD,
             bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
             padx=theme.PAD, pady=theme.PAD,
         )
-        self.chat_panel.pack(fill="both", expand=True, padx=theme.PAD, pady=theme.PAD_SMALL)
+        self.notebook.add(self.chat_panel, text="Chat")
         self.chat_panel.rowconfigure(0, weight=1)
         self.chat_panel.columnconfigure(0, weight=1)
 
@@ -213,7 +226,147 @@ class ClientApp:
         self.send_button.grid(row=1, column=1, sticky="e",
                               padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
         self._build_udp_panel()
+        self._build_monitor_panels()
         self._poll_events()
+
+    def _build_monitor_panels(self) -> None:
+        """Build event-driven statistics and a bounded, read-only live log."""
+        self.stats_panel = tk.Frame(self.notebook, bg=theme.COLOR_PANEL)
+        self.notebook.add(self.stats_panel, text="Statistics")
+        self.stat_labels: dict[str, tk.Label] = {}
+        rows = (
+            ("packets_sent", "Packets sent"), ("packets_received", "Packets received"),
+            ("bytes_sent", "Bytes sent"), ("bytes_received", "Bytes received"),
+            ("retransmissions", "Retransmissions"),
+            ("packets_dropped_simulated", "Simulated drops"),
+            ("duplicates_received", "Duplicates received"),
+            ("checksum_errors", "Checksum errors"), ("avg_rtt_ms", "Average RTT (ms)"),
+        )
+        for index, (key, title) in enumerate(rows):
+            row, group = divmod(index, 3)
+            column = group * 2
+            tk.Label(
+                self.stats_panel, text=title, font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            ).grid(row=row, column=column, sticky="w", padx=theme.PAD, pady=theme.PAD_SMALL)
+            label = tk.Label(
+                self.stats_panel, text="—", font=theme.FONT_BOLD,
+                bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            )
+            label.grid(row=row, column=column + 1, sticky="e", padx=theme.PAD)
+            self.stat_labels[key] = label
+            self.stats_panel.columnconfigure(column, weight=1)
+
+        self.log_panel = tk.Frame(self.notebook, bg=theme.COLOR_PANEL)
+        self.notebook.add(self.log_panel, text="Live log")
+        self.log_panel.columnconfigure(0, weight=1)
+        self.log_panel.rowconfigure(0, weight=1)
+        self.log_text = tk.Text(
+            self.log_panel, height=5, width=40, wrap="word", state=tk.DISABLED,
+            font=theme.FONT_MONO, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        )
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = tk.Scrollbar(self.log_panel, command=self.log_text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        colors = {
+            "INFO": theme.COLOR_TEXT, "DEBUG": theme.COLOR_MUTED,
+            "JOINED": theme.COLOR_CONNECTED, "LEFT": theme.COLOR_CONNECTING,
+            "WARNING": theme.COLOR_CONNECTING, "ERROR": theme.COLOR_DISCONNECTED,
+            "CRITICAL": theme.COLOR_DISCONNECTED,
+            "SENT": theme.COLOR_PKT_SENT, "RECEIVED": theme.COLOR_PKT_RECEIVED,
+            "DROPPED": theme.COLOR_PKT_DROPPED,
+            "RETRANSMITTED": theme.COLOR_PKT_RETRANSMITTED,
+        }
+        for tag, color in colors.items():
+            self.log_text.tag_configure(tag, foreground=color)
+
+    def _append_log(self, level: str, message: str, timestamp: float) -> None:
+        """Keep the latest 500 physical lines, including multiline event messages."""
+        level = str(level).upper()
+        tag = level if level in self.log_text.tag_names() else "INFO"
+        clock = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+        self.log_text.configure(state=tk.NORMAL)
+        try:
+            for line in str(message).splitlines() or [""]:
+                self.log_text.insert(tk.END, f"{clock} [{tag}] {line}\n", tag)
+            lines = int(self.log_text.index("end-1c").split(".")[0]) - 1
+            if lines > 500:
+                self.log_text.delete("1.0", f"{lines - 500 + 1}.0")
+            self.log_text.see(tk.END)
+        finally:
+            self.log_text.configure(state=tk.DISABLED)
+
+    def _show_notice(self, message: str, level: str, event: Event) -> None:
+        """Keep user-facing diagnostics visible even when the log tab is hidden."""
+        color = theme.COLOR_DISCONNECTED if level == "ERROR" else theme.COLOR_CONNECTING
+        self.notice_label.configure(text=message, fg=color)
+        self._append_log(level, message, event.timestamp)
+
+    @staticmethod
+    def _disconnect_message(reason: object) -> str:
+        """Translate existing enum values without inventing new reason codes."""
+        messages = {
+            DisconnectReason.USER: "Bağlantı kapatıldı",
+            DisconnectReason.SERVER_SHUTDOWN: "Sunucu kapandı",
+            DisconnectReason.KICKED_BY_ADMIN: "Yönetici tarafından atıldınız",
+            DisconnectReason.TIMEOUT: "Bağlantı zaman aşımına uğradı",
+            DisconnectReason.CONNECTION_LOST: "Bağlantı koptu, yeniden deneniyor",
+            DisconnectReason.REJECTED: "Sunucu bağlantıyı reddetti",
+            DisconnectReason.CONNECT_FAILED: "Sunucuya bağlanılamadı",
+            DisconnectReason.INTERNAL_ERROR: "Beklenmeyen hata",
+        }
+        return messages.get(getattr(reason, "value", reason), "Bağlantı sonlandı")
+
+    @staticmethod
+    def _error_message(code: object) -> str:
+        """Resolve client codes first, then protocol codes; hide unknown details."""
+        value = getattr(code, "value", code)
+        try:
+            known = ClientErrorCode(value)
+        except (ValueError, TypeError):
+            try:
+                known = ErrorCode(value)
+            except (ValueError, TypeError):
+                return "Beklenmeyen bir hata oluştu"
+        messages = {
+            ClientErrorCode.CONNECTION_REFUSED: "Sunucu bağlantıyı kabul etmiyor",
+            ClientErrorCode.CONNECT_TIMEOUT: "Sunucuya bağlantı zaman aşımına uğradı",
+            ClientErrorCode.CONNECTION_LOST: "Sunucuyla bağlantı koptu",
+            ClientErrorCode.PROTOCOL_ERROR: "Sunucudan geçersiz veri alındı",
+            ClientErrorCode.INVALID_STATE: "Bu işlem mevcut bağlantı durumunda kullanılamaz",
+            ErrorCode.BAD_CHECKSUM: "Veri bütünlüğü kontrolü başarısız",
+            ErrorCode.MALFORMED_PACKET: "Geçersiz paket alındı",
+            ErrorCode.VERSION_MISMATCH: "Protokol sürümleri uyumlu değil",
+            ErrorCode.NOT_AUTHENTICATED: "Önce sunucuya bağlanmalısınız",
+            ErrorCode.INVALID_USERNAME: "Kullanıcı adı geçersiz",
+            ErrorCode.USERNAME_TAKEN: "Bu kullanıcı adı zaten kullanılıyor",
+            ErrorCode.UNKNOWN_USER: "Alıcı kullanıcı bulunamadı",
+            ErrorCode.PAYLOAD_TOO_LARGE: "Gönderilecek veri boyut sınırını aşıyor",
+            ErrorCode.SERVER_FULL: "Sunucu dolu",
+            ErrorCode.FILE_REJECTED: "Dosya reddedildi",
+            ErrorCode.INTERNAL_ERROR: "Sunucuda beklenmeyen hata oluştu",
+        }
+        return messages[known]
+
+    @staticmethod
+    def _file_failure_message(reason: object) -> str:
+        """Describe file failures without starting a transfer or adding file controls."""
+        messages = {
+            FileFailReason.INVALID_FILE: "Dosya geçersiz",
+            FileFailReason.READ_ERROR: "Dosya okunamadı",
+            FileFailReason.SEND_ERROR: "Dosya gönderilemedi",
+            FileFailReason.CANCELLED: "Dosya aktarımı iptal edildi",
+            FileFailReason.FILE_TOO_LARGE: "Dosya boyut sınırını aşıyor",
+            FileFailReason.BAD_PACKET: "Dosya aktarım paketi geçersiz",
+            FileFailReason.BAD_CHUNK: "Dosya parçası geçersiz",
+            FileFailReason.TRANSFER_ID_CONFLICT: "Dosya aktarım kimliği çakıştı",
+            FileFailReason.MISSING_CHUNKS: "Dosya parçaları eksik",
+            FileFailReason.CHECKSUM_MISMATCH: "Dosya bütünlüğü doğrulanamadı",
+            FileFailReason.WRITE_ERROR: "Dosya kaydedilemedi",
+            FileFailReason.CONNECTION_LOST: "Dosya aktarımı sırasında bağlantı koptu",
+        }
+        return messages.get(getattr(reason, "value", reason), "Dosya aktarımı başarısız")
 
     def _build_udp_panel(self) -> None:
         """Build local simulation inputs; no transport is called here."""
@@ -226,7 +379,7 @@ class ClientApp:
             bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
             padx=theme.PAD, pady=theme.PAD_SMALL,
         )
-        self.udp_panel.pack(fill="x", before=self.chat_panel,
+        self.udp_panel.pack(fill="x", before=self.notebook,
                             padx=theme.PAD, pady=theme.PAD_SMALL)
         self.udp_controls: list[tk.Scale | tk.Spinbox] = []
         for column, (label, variable, maximum) in enumerate((
@@ -315,6 +468,40 @@ class ClientApp:
 
     def _handle_event(self, event: Event) -> None:
         """Render queued chat, user-list and connection events on the Tk thread."""
+        data = event.data
+        if event.type == EventType.STATS_UPDATED:
+            for key, label in self.stat_labels.items():
+                value = data["stats"].get(key)
+                label.configure(text=(f"{value:.1f}" if key == "avg_rtt_ms"
+                                      and isinstance(value, (int, float))
+                                      else str(value) if value is not None else "—"))
+            return
+        if event.type == EventType.LOG:
+            self._append_log(data["level"], data["message"], event.timestamp)
+            return
+        packet_tags = {
+            EventType.PACKET_SENT: "SENT", EventType.PACKET_RECEIVED: "RECEIVED",
+            EventType.PACKET_DROPPED: "DROPPED",
+            EventType.PACKET_RETRANSMITTED: "RETRANSMITTED",
+        }
+        if event.type in packet_tags:
+            description = str(data["summary"])
+            if event.type == EventType.PACKET_RETRANSMITTED:
+                description += f" (attempt {data['attempt']})"
+            self._append_log(packet_tags[event.type], description, event.timestamp)
+            return
+        if event.type == EventType.PACKET_CORRUPTED:
+            description = {"checksum": "Paket bütünlüğü kontrolü başarısız",
+                           "malformed": "Bozuk paket alındı"}.get(
+                               data["reason"], "Geçersiz paket alındı")
+            self._append_log("ERROR", description, event.timestamp)
+            return
+        if event.type == EventType.ERROR:
+            self._show_notice(self._error_message(data["code"]), "ERROR", event)
+            return
+        if event.type == EventType.FILE_FAILED:
+            self._show_notice(self._file_failure_message(data["reason"]), "ERROR", event)
+            return
         if event.type == EventType.MESSAGE_RECEIVED:
             timestamp = datetime.fromtimestamp(event.data["timestamp"]).strftime("%H:%M:%S")
             recipient = event.data["to"]
@@ -339,8 +526,10 @@ class ClientApp:
             state = ConnectionState(event.data["new"])
         elif event.type == EventType.CONNECTED:
             state = ConnectionState.CONNECTED
+            self.notice_label.configure(text="")
         elif event.type == EventType.DISCONNECTED:
             state = ConnectionState.DISCONNECTED
+            self._show_notice(self._disconnect_message(data["reason"]), "WARNING", event)
         else:
             # Other event types will be handled when their panels are implemented.
             return
