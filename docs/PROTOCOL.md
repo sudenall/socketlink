@@ -108,7 +108,7 @@ Alan isimleri **snake_case** ve tam olarak aşağıdaki gibidir. `timestamp` her
 { "code": "USERNAME_TAKEN", "message": "Username 'sude' is already in use." }
 
 // BYE (↔)
-{ "reason": "client_quit" }    // client_quit | server_shutdown | kicked_by_admin | timeout
+{ "reason": "client_quit" }    // client_quit | server_shutdown | kicked_by_admin | timeout (kodda: ByeReason)
 ```
 
 **FILE_CHUNK payload (ham):**
@@ -226,4 +226,5 @@ Bunlar protokol hatası değil, **bağlantı durumudur**; `ERROR` paketine karş
 | Sürüm | Tarih | Kim | Değişiklik |
 |---|---|---|---|
 | v1-draft | 2026-10-17 | Sude | İlk taslak |
+| v1-draft | 2026-10-19 | Sude | §4: BYE nedenleri için `ByeReason` enum'u (`constants.py`), değerler aynı |
 | v1-draft | 2026-10-19 | Sude | §7: her hata kodu için "Python hatası" sütunu, §7.1 bağlantı durumu hataları eklendi (davranış değişmedi) |
