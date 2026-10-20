@@ -23,9 +23,10 @@ Ownership of state changes:
     - Every connection attempt gets a fresh `_stop_event`, so threads of an old
       session can never keep running in a new one.
 
-Error events: an ERROR packet from the server is published with the server's `code`.
-Local failures (refused connection, handshake timeout, lost connection) are published
-with the exception class name as `code`, e.g. "ConnectionRefusedError".
+Error events: an ERROR packet from the server is published with the server's `code`
+(ErrorCode). Failures the client detects itself use ClientErrorCode (CONNECTION_REFUSED,
+CONNECT_TIMEOUT, CONNECTION_LOST, PROTOCOL_ERROR, INVALID_STATE).
+DISCONNECTED events always carry a DisconnectReason value (docs/ARCHITECTURE.md).
 """
 
 from __future__ import annotations
@@ -48,7 +49,11 @@ from socketlink.common.constants import (
     STATE_TRANSITIONS,
     STATS_UPDATE_INTERVAL,
     USERNAME_PATTERN,
+    ByeReason,
+    ClientErrorCode,
     ConnectionState,
+    DisconnectReason,
+    ErrorCode,
     MessageType,
 )
 from socketlink.common.events import Event, EventBus, EventType
@@ -68,10 +73,6 @@ from socketlink.common.stats import TransportStats
 from socketlink.common.transport import Transport, create_transport
 
 log = get_logger(__name__)
-
-# BYE reasons sent by the server (docs/PROTOCOL.md section 4).
-_BYE_REASON_KICKED = "kicked_by_admin"
-_DISCONNECT_REASON_USER = "user"
 
 
 class _HandshakeError(SocketLinkError):
@@ -137,7 +138,7 @@ class ChatClient:
         threading.Thread(target=self._connect_worker, name="cli-connect", daemon=True).start()
 
     def disconnect(self) -> None:
-        """Send BYE, stop threads, close transport, publish DISCONNECTED(reason='user').
+        """Send BYE, stop threads, close transport, publish DISCONNECTED(reason=USER).
 
         Idempotent: does nothing when already DISCONNECTED or DISCONNECTING.
         """
@@ -223,7 +224,7 @@ class ChatClient:
         except Exception as exc:  # last-resort guard: a network thread must never die silently
             log.exception("Receiver thread crashed")
             self._publish_error(exc)
-            self._end_session("internal_error")
+            self._end_session(DisconnectReason.INTERNAL_ERROR)
             return
         # disconnect() may have read CONNECTING just before this session went CONNECTED;
         # then it only set the stop event, and finishing the disconnect is our job.
@@ -248,11 +249,15 @@ class ChatClient:
 
     def _handle_connection_lost(self, reason: str) -> None:
         """If config.auto_reconnect: RECONNECTING and retry with RECONNECT_DELAYS,
-        else DISCONNECTED. Always publish an event; never raise."""
+        else DISCONNECTED. Always publish an event; never raise.
+
+        `reason` is a DisconnectReason; it becomes the DISCONNECTED reason if every
+        reconnect attempt fails.
+        """
         stop_event = self._stop_event
         if stop_event.is_set():
             return
-        log.warning("Connection lost: %s", reason)
+        log.warning("Connection lost: %s", DisconnectReason(reason).value)
         self._close_transport()
         if not self.config.auto_reconnect:
             self._end_session(reason)
@@ -280,14 +285,14 @@ class ChatClient:
         self._close_transport()
         self._set_state(ConnectionState.DISCONNECTED)
         if stop_event.is_set():
-            reason = _DISCONNECT_REASON_USER
+            reason = DisconnectReason.USER
         elif last_error is not None:
             self._publish_error(
                 last_error,
                 f"Could not reconnect after {len(RECONNECT_DELAYS)} attempts: {last_error}",
             )
         stop_event.set()
-        self._publish(EventType.DISCONNECTED, {"reason": reason})
+        self._publish(EventType.DISCONNECTED, {"reason": DisconnectReason(reason).value})
 
     # ---- connection helpers --------------------------------------------------
     def _connect_worker(self) -> None:
@@ -296,20 +301,22 @@ class ChatClient:
         try:
             transport, welcome = self._open_session(stop_event)
         except (SocketLinkError, OSError) as exc:
-            if not stop_event.is_set():
+            reason = self._failure_reason(exc, stop_event)  # before stop_event.set() below
+            if reason is not DisconnectReason.USER:
                 log.warning("Connect to %s:%d failed: %s",
                             self.config.host, self.config.port, exc)
                 self._publish_error(exc)
             stop_event.set()
             self._set_state(ConnectionState.DISCONNECTED)
-            self._publish(EventType.DISCONNECTED, {"reason": self._failure_reason(exc)})
+            self._publish(EventType.DISCONNECTED, {"reason": reason.value})
             return
         except Exception as exc:  # last-resort guard: a network thread must never die silently
             log.exception("Connect thread crashed")
             self._publish_error(exc)
             stop_event.set()
             self._set_state(ConnectionState.DISCONNECTED)
-            self._publish(EventType.DISCONNECTED, {"reason": "internal_error"})
+            self._publish(EventType.DISCONNECTED,
+                          {"reason": DisconnectReason.INTERNAL_ERROR.value})
             return
         self._transport = transport
         self._activate_session(welcome)
@@ -389,10 +396,10 @@ class ChatClient:
         self._close_transport()
         self._set_state(ConnectionState.DISCONNECTED)
         log.info("Disconnected by the user")
-        self._publish(EventType.DISCONNECTED, {"reason": _DISCONNECT_REASON_USER})
+        self._publish(EventType.DISCONNECTED, {"reason": DisconnectReason.USER.value})
         return True
 
-    def _end_session(self, reason: str) -> None:
+    def _end_session(self, reason: DisconnectReason) -> None:
         """Final disconnect without reconnecting (kicked, auto_reconnect off, crash)."""
         stop_event = self._stop_event
         stop_event.set()
@@ -406,7 +413,7 @@ class ChatClient:
             self._set_state(ConnectionState.DISCONNECTED)
         except InvalidStateError:
             return  # already DISCONNECTED (another thread finished first)
-        self._publish(EventType.DISCONNECTED, {"reason": reason})
+        self._publish(EventType.DISCONNECTED, {"reason": DisconnectReason(reason).value})
 
     def _wait_for_server_close(self) -> None:
         """After BYE, read and discard packets until the server closes (max SOCKET_TIMEOUT).
@@ -431,26 +438,26 @@ class ChatClient:
             transport.close()  # idempotent
 
     # ---- receiving ------------------------------------------------------------
-    def _receive_one(self, transport: Transport) -> str | None:
-        """Receive and dispatch one packet. Returns a reason string when the
+    def _receive_one(self, transport: Transport) -> DisconnectReason | None:
+        """Receive and dispatch one packet. Returns a DisconnectReason when the
         connection must be treated as lost, otherwise None."""
         try:
             packet = transport.receive(timeout=SOCKET_TIMEOUT)
         except TransportTimeoutError:
             if time.monotonic() - self._last_received > CONNECTION_TIMEOUT:
-                return "timeout"
+                return DisconnectReason.TIMEOUT
             return None
         except ConnectionClosedError:
-            return "connection_lost"
+            return DisconnectReason.CONNECTION_LOST
         except ProtocolError as exc:
             # Malformed header / wrong version / oversized: the TCP stream can no
             # longer be trusted (PROTOCOL.md section 7), so drop this connection.
             log.warning("Protocol error from server: %s", exc)
             self._publish_error(exc)
-            return "protocol_error"
+            return DisconnectReason.CONNECTION_LOST
         except TransportError as exc:
             log.warning("Transport error: %s", exc)
-            return "connection_lost"
+            return DisconnectReason.CONNECTION_LOST
         self._last_received = time.monotonic()
         try:
             return self._dispatch(packet)
@@ -461,7 +468,7 @@ class ChatClient:
             self._publish_error(exc)
             return None
 
-    def _dispatch(self, packet: Packet) -> str | None:
+    def _dispatch(self, packet: Packet) -> DisconnectReason | None:
         """Handle one valid packet. Returns a reason when the server ended the session."""
         message_type = packet.type
         if message_type is MessageType.CHAT:
@@ -486,10 +493,11 @@ class ChatClient:
             log.warning("Server error %s: %s", code, message)
             self._publish(EventType.ERROR, {"code": code, "message": message})
         elif message_type is MessageType.BYE:
-            reason = str(packet.json_payload().get("reason", "server_closed"))
-            log.info("Server said BYE: %s", reason)
-            if reason == _BYE_REASON_KICKED:
-                self._end_session(reason)
+            bye_reason = str(packet.json_payload().get("reason", ""))
+            log.info("Server said BYE: %s", bye_reason)
+            reason = DisconnectReason.from_bye(bye_reason)
+            if bye_reason == ByeReason.KICKED_BY_ADMIN.value:
+                self._end_session(reason)  # kicked: never reconnect
                 return None
             return reason
         elif message_type in (MessageType.FILE_START, MessageType.FILE_CHUNK,
@@ -546,15 +554,34 @@ class ChatClient:
             raise MalformedPacketError(f"{packet.type.name} payload is missing {missing}.")
 
     @staticmethod
-    def _failure_reason(exc: BaseException) -> str:
+    def _failure_reason(exc: BaseException, stop_event: threading.Event) -> DisconnectReason:
+        """DISCONNECTED reason for a connection attempt that did not reach WELCOME."""
+        if stop_event.is_set():
+            return DisconnectReason.USER
         if isinstance(exc, _HandshakeError):
-            return exc.code or "rejected"
-        if isinstance(exc, ConnectionClosedError) and "cancelled" in str(exc):
-            return _DISCONNECT_REASON_USER
-        return "connect_failed"
+            return DisconnectReason.REJECTED  # the server's code travels in the ERROR event
+        return DisconnectReason.CONNECT_FAILED
+
+    @staticmethod
+    def _error_code(exc: BaseException) -> str:
+        """`code` of the ERROR event for `exc` (most specific class first)."""
+        if isinstance(exc, _HandshakeError):
+            return exc.code
+        if isinstance(exc, ConnectionRefusedError):
+            return ClientErrorCode.CONNECTION_REFUSED.value
+        if isinstance(exc, (TimeoutError, TransportTimeoutError)):
+            return ClientErrorCode.CONNECT_TIMEOUT.value
+        if isinstance(exc, ProtocolError):
+            return ClientErrorCode.PROTOCOL_ERROR.value
+        if isinstance(exc, InvalidStateError):
+            return ClientErrorCode.INVALID_STATE.value
+        if isinstance(exc, (TransportError, OSError)):
+            # ConnectionClosedError, ConnectionResetError and other socket errors
+            return ClientErrorCode.CONNECTION_LOST.value
+        return ErrorCode.INTERNAL_ERROR.value
 
     def _publish_error(self, exc: BaseException, message: str | None = None) -> None:
-        code = exc.code if isinstance(exc, _HandshakeError) else type(exc).__name__
+        code = self._error_code(exc)
         self._publish(EventType.ERROR, {"code": code, "message": message or str(exc)})
 
     def _publish(self, event_type: EventType, data: dict[str, Any]) -> None:

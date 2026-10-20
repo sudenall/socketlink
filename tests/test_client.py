@@ -7,6 +7,7 @@ chat, heartbeat/RTT, silent server, kick, protocol errors, invalid states.
 The fake server is defined here (not the real ChatServer) so these tests only depend
 on the protocol and transport, which are already on main. Every test listens on port 0
 (D-15). Timing constants are shortened with monkeypatch so the suite stays fast.
+Shared helpers (event_bus, event_queue, wait_for_event) come from conftest.py.
 """
 
 from __future__ import annotations
@@ -22,15 +23,26 @@ from socketlink.client import client as client_module
 from socketlink.client.client import ChatClient
 from socketlink.common import protocol as p
 from socketlink.common.config import ClientConfig
-from socketlink.common.constants import ConnectionState, ErrorCode, MessageType, TransportMode
+from socketlink.common.constants import (
+    ByeReason,
+    ClientErrorCode,
+    ConnectionState,
+    DisconnectReason,
+    ErrorCode,
+    MessageType,
+    TransportMode,
+)
 from socketlink.common.events import Event, EventBus, EventType
 from socketlink.common.exceptions import (
+    BadChecksumError,
     ConnectionClosedError,
     InvalidStateError,
+    MalformedPacketError,
     TransportTimeoutError,
     ValidationError,
 )
 from socketlink.common.transport import TcpListener, Transport
+from tests.conftest import wait_for_event
 
 pytestmark = pytest.mark.integration
 
@@ -44,18 +56,7 @@ EVENT_TIMEOUT = 5.0
 # --------------------------------------------------------------------------- #
 def wait_for(q: queue.Queue[Event], event_type: EventType, timeout: float = EVENT_TIMEOUT,
              predicate: Callable[[Event], bool] | None = None) -> Event:
-    """Return the first matching event from `q`; other events are skipped."""
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise AssertionError(f"no {event_type.name} event within {timeout} s")
-        try:
-            event = q.get(timeout=remaining)
-        except queue.Empty:
-            raise AssertionError(f"no {event_type.name} event within {timeout} s") from None
-        if event.type is event_type and (predicate is None or predicate(event)):
-            return event
+    return wait_for_event(q, event_type, timeout, predicate)
 
 
 def wait_for_state(q: queue.Queue[Event], state: ConnectionState,
@@ -182,16 +183,6 @@ def fast_timing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def bus() -> EventBus:
-    return EventBus()
-
-
-@pytest.fixture
-def events(bus: EventBus) -> queue.Queue[Event]:
-    return bus.subscribe_queue()
-
-
-@pytest.fixture
 def server() -> Iterator[FakeServer]:
     fake = FakeServer().start()
     yield fake
@@ -199,8 +190,8 @@ def server() -> Iterator[FakeServer]:
 
 
 @pytest.fixture
-def chat_client(bus: EventBus) -> Iterator[ChatClient]:
-    chat = ChatClient(bus)
+def chat_client(event_bus: EventBus) -> Iterator[ChatClient]:
+    chat = ChatClient(event_bus)
     yield chat
     chat.disconnect()
 
@@ -221,10 +212,10 @@ def free_port() -> int:
     return port
 
 
-def connect(chat: ChatClient, events: queue.Queue[Event], port: int,
+def connect(chat: ChatClient, event_queue: queue.Queue[Event], port: int,
             **overrides: object) -> Event:
     chat.connect(make_config(port, **overrides))
-    return wait_for(events, EventType.CONNECTED)
+    return wait_for(event_queue, EventType.CONNECTED)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,9 +228,9 @@ def test_set_state_with_illegal_transition_raises(chat_client: ChatClient) -> No
 
 
 def test_set_state_publishes_state_changed(chat_client: ChatClient,
-                                           events: queue.Queue[Event]) -> None:
+                                           event_queue: queue.Queue[Event]) -> None:
     chat_client._set_state(ConnectionState.CONNECTING)
-    event = wait_for(events, EventType.STATE_CHANGED)
+    event = wait_for(event_queue, EventType.STATE_CHANGED)
     event.validate()
     assert event.data == {"old": ConnectionState.DISCONNECTED, "new": ConnectionState.CONNECTING}
 
@@ -257,80 +248,80 @@ def test_connect_with_invalid_username_raises_validation_error(
 
 
 def test_connect_twice_raises_invalid_state(chat_client: ChatClient, server: FakeServer,
-                                            events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+                                            event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     with pytest.raises(InvalidStateError):
         chat_client.connect()
 
 
 def test_disconnect_when_disconnected_does_nothing(chat_client: ChatClient,
-                                                  events: queue.Queue[Event]) -> None:
+                                                  event_queue: queue.Queue[Event]) -> None:
     chat_client.disconnect()
     chat_client.disconnect()
-    assert events.empty()
+    assert event_queue.empty()
 
 
 # --------------------------------------------------------------------------- #
 # Connecting (T-08 and the handshake)
 # --------------------------------------------------------------------------- #
 def test_connect_to_closed_server_publishes_error(chat_client: ChatClient,
-                                                  events: queue.Queue[Event]) -> None:
+                                                  event_queue: queue.Queue[Event]) -> None:
     """T-08: nobody listening -> ERROR event, back to DISCONNECTED, no crash."""
     chat_client.connect(make_config(free_port()))
-    error = wait_for(events, EventType.ERROR)
+    error = wait_for(event_queue, EventType.ERROR)
     error.validate()
-    assert error.data["code"] == "ConnectionRefusedError"
-    wait_for_state(events, ConnectionState.DISCONNECTED)
+    assert error.data["code"] == ClientErrorCode.CONNECTION_REFUSED
+    wait_for_state(event_queue, ConnectionState.DISCONNECTED)
     assert chat_client.state is ConnectionState.DISCONNECTED
 
 
 def test_connect_handshake_publishes_connected_and_user_list(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connected = connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connected = connect(chat_client, event_queue, server.port)
     connected.validate()
     assert connected.data["client_id"] == 7
     assert connected.data["username"] == USERNAME
-    users = wait_for(events, EventType.USER_LIST_UPDATED)
+    users = wait_for(event_queue, EventType.USER_LIST_UPDATED)
     assert users.data["users"] == [USERNAME]
     assert chat_client.state is ConnectionState.CONNECTED
     assert server.types_received()[0] is MessageType.HELLO
 
 
 def test_connect_rejected_by_server_publishes_server_error_code(
-        chat_client: ChatClient, events: queue.Queue[Event]) -> None:
+        chat_client: ChatClient, event_queue: queue.Queue[Event]) -> None:
     fake = FakeServer(reject_code=ErrorCode.USERNAME_TAKEN.value).start()
     try:
         chat_client.connect(make_config(fake.port))
-        error = wait_for(events, EventType.ERROR)
+        error = wait_for(event_queue, EventType.ERROR)
         assert error.data["code"] == ErrorCode.USERNAME_TAKEN.value
-        disconnected = wait_for(events, EventType.DISCONNECTED)
-        assert disconnected.data["reason"] == ErrorCode.USERNAME_TAKEN.value
+        disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+        assert disconnected.data["reason"] == DisconnectReason.REJECTED
         assert chat_client.state is ConnectionState.DISCONNECTED
     finally:
         fake.stop()
 
 
 def test_connect_without_welcome_times_out(chat_client: ChatClient,
-                                           events: queue.Queue[Event]) -> None:
+                                           event_queue: queue.Queue[Event]) -> None:
     fake = FakeServer(answer_hello=False).start()
     try:
         chat_client.connect(make_config(fake.port))
-        error = wait_for(events, EventType.ERROR)
-        assert error.data["code"] == "TransportTimeoutError"
-        wait_for_state(events, ConnectionState.DISCONNECTED)
+        error = wait_for(event_queue, EventType.ERROR)
+        assert error.data["code"] == ClientErrorCode.CONNECT_TIMEOUT
+        wait_for_state(event_queue, ConnectionState.DISCONNECTED)
     finally:
         fake.stop()
 
 
 def test_disconnect_while_connecting_ends_disconnected(
-        chat_client: ChatClient, events: queue.Queue[Event]) -> None:
+        chat_client: ChatClient, event_queue: queue.Queue[Event]) -> None:
     fake = FakeServer(answer_hello=False).start()
     try:
         chat_client.connect(make_config(fake.port))
         assert fake.accepted.wait(EVENT_TIMEOUT)
         chat_client.disconnect()
-        disconnected = wait_for(events, EventType.DISCONNECTED)
-        assert disconnected.data["reason"] == "user"
+        disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+        assert disconnected.data["reason"] == DisconnectReason.USER
         assert chat_client.state is ConnectionState.DISCONNECTED
     finally:
         fake.stop()
@@ -340,48 +331,48 @@ def test_disconnect_while_connecting_ends_disconnected(
 # Chat
 # --------------------------------------------------------------------------- #
 def test_send_chat_publishes_sent_and_receives_echo(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     chat_client.send_chat("merhaba")
-    sent = wait_for(events, EventType.MESSAGE_SENT)
+    sent = wait_for(event_queue, EventType.MESSAGE_SENT)
     sent.validate()
     assert sent.data["text"] == "merhaba" and sent.data["to"] is None
-    received = wait_for(events, EventType.MESSAGE_RECEIVED)
+    received = wait_for(event_queue, EventType.MESSAGE_RECEIVED)
     received.validate()
     assert received.data["from"] == USERNAME and received.data["text"] == "merhaba"
 
 
 @pytest.mark.parametrize("text", ["", "   ", "x" * (client_module.MAX_CHAT_LENGTH + 1)])
 def test_send_chat_with_invalid_text_raises_validation_error(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event],
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
         text: str) -> None:
-    connect(chat_client, events, server.port)
+    connect(chat_client, event_queue, server.port)
     with pytest.raises(ValidationError):
         chat_client.send_chat(text)
 
 
 def test_send_chat_with_invalid_recipient_raises_validation_error(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     with pytest.raises(ValidationError):
         chat_client.send_chat("hi", to="../root")
 
 
 def test_error_packet_from_server_becomes_error_event(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     server.send_to_all(p.make_error(ErrorCode.UNKNOWN_USER.value, "no such user"))
-    error = wait_for(events, EventType.ERROR)
+    error = wait_for(event_queue, EventType.ERROR)
     assert error.data == {"code": ErrorCode.UNKNOWN_USER.value, "message": "no such user"}
     assert chat_client.state is ConnectionState.CONNECTED
 
 
 def test_chat_packet_missing_fields_is_reported_and_connection_kept(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     server.send_to_all(p.make_chat("no sender"))  # server->client CHAT without from/timestamp
-    error = wait_for(events, EventType.ERROR)
-    assert error.data["code"] == "MalformedPacketError"
+    error = wait_for(event_queue, EventType.ERROR)
+    assert error.data["code"] == ClientErrorCode.PROTOCOL_ERROR
     assert chat_client.state is ConnectionState.CONNECTED
 
 
@@ -389,31 +380,31 @@ def test_chat_packet_missing_fields_is_reported_and_connection_kept(
 # Disconnecting
 # --------------------------------------------------------------------------- #
 def test_disconnect_sends_bye_and_publishes_disconnected(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     chat_client.disconnect()
-    disconnected = wait_for(events, EventType.DISCONNECTED)
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
     disconnected.validate()
-    assert disconnected.data["reason"] == "user"
+    assert disconnected.data["reason"] == DisconnectReason.USER
     assert chat_client.state is ConnectionState.DISCONNECTED
     wait_until(lambda: MessageType.BYE in server.types_received())
 
 
 def test_client_can_connect_again_after_disconnect(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     chat_client.disconnect()
-    wait_for(events, EventType.DISCONNECTED)
-    connect(chat_client, events, server.port)
+    wait_for(event_queue, EventType.DISCONNECTED)
+    connect(chat_client, event_queue, server.port)
     assert chat_client.state is ConnectionState.CONNECTED
 
 
 def test_kick_from_server_disconnects_without_reconnect(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
-    server.send_to_all(p.make_bye("kicked_by_admin"))
-    disconnected = wait_for(events, EventType.DISCONNECTED)
-    assert disconnected.data["reason"] == "kicked_by_admin", disconnected.data
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
+    server.send_to_all(p.make_bye(ByeReason.KICKED_BY_ADMIN))
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    assert disconnected.data["reason"] == DisconnectReason.KICKED_BY_ADMIN
     assert chat_client.state is ConnectionState.DISCONNECTED
 
 
@@ -421,87 +412,87 @@ def test_kick_from_server_disconnects_without_reconnect(
 # Connection loss and reconnecting (T-09)
 # --------------------------------------------------------------------------- #
 def test_server_down_goes_reconnecting_then_disconnected(
-        chat_client: ChatClient, events: queue.Queue[Event]) -> None:
+        chat_client: ChatClient, event_queue: queue.Queue[Event]) -> None:
     """T-09: server disappears -> RECONNECTING -> every attempt fails -> DISCONNECTED."""
     fake = FakeServer().start()
-    connect(chat_client, events, fake.port)
+    connect(chat_client, event_queue, fake.port)
     fake.stop()
-    wait_for_state(events, ConnectionState.RECONNECTING)
-    error = wait_for(events, EventType.ERROR)
+    wait_for_state(event_queue, ConnectionState.RECONNECTING)
+    error = wait_for(event_queue, EventType.ERROR)
     assert "reconnect" in error.data["message"].lower()
-    disconnected = wait_for(events, EventType.DISCONNECTED)
-    assert disconnected.data["reason"] == "connection_lost"
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    assert disconnected.data["reason"] == DisconnectReason.CONNECTION_LOST
     assert chat_client.state is ConnectionState.DISCONNECTED
 
 
 def test_reconnects_when_server_accepts_again(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     server.drop_clients()  # connection breaks, listener stays up
-    wait_for_state(events, ConnectionState.RECONNECTING)
-    wait_for(events, EventType.CONNECTED)
+    wait_for_state(event_queue, ConnectionState.RECONNECTING)
+    wait_for(event_queue, EventType.CONNECTED)
     assert chat_client.state is ConnectionState.CONNECTED
     chat_client.send_chat("after reconnect")
-    received = wait_for(events, EventType.MESSAGE_RECEIVED)
+    received = wait_for(event_queue, EventType.MESSAGE_RECEIVED)
     assert received.data["text"] == "after reconnect"
 
 
 def test_connection_lost_without_auto_reconnect_goes_disconnected(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port, auto_reconnect=False)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port, auto_reconnect=False)
     server.drop_clients()
-    disconnected = wait_for(events, EventType.DISCONNECTED)
-    assert disconnected.data["reason"] == "connection_lost"
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    assert disconnected.data["reason"] == DisconnectReason.CONNECTION_LOST
     assert chat_client.state is ConnectionState.DISCONNECTED
 
 
 def test_disconnect_while_reconnecting_stops_retrying(
-        chat_client: ChatClient, events: queue.Queue[Event],
+        chat_client: ChatClient, event_queue: queue.Queue[Event],
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client_module, "RECONNECT_DELAYS", (0.5, 0.5, 0.5))
     fake = FakeServer().start()
-    connect(chat_client, events, fake.port)
+    connect(chat_client, event_queue, fake.port)
     fake.stop()
-    wait_for_state(events, ConnectionState.RECONNECTING)
+    wait_for_state(event_queue, ConnectionState.RECONNECTING)
     chat_client.disconnect()
-    disconnected = wait_for(events, EventType.DISCONNECTED)
-    assert disconnected.data["reason"] == "user"
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    assert disconnected.data["reason"] == DisconnectReason.USER
     assert chat_client.state is ConnectionState.DISCONNECTED
 
 
 def test_malformed_header_from_server_drops_connection(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port, auto_reconnect=False)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port, auto_reconnect=False)
     with server._lock:
         server_side = server.connections[0]
     server_side._sock.sendall(b"XX" + bytes(20))  # wrong magic bytes
-    error = wait_for(events, EventType.ERROR)
-    assert error.data["code"] == "MalformedPacketError"
-    disconnected = wait_for(events, EventType.DISCONNECTED)
-    assert disconnected.data["reason"] == "protocol_error"
+    error = wait_for(event_queue, EventType.ERROR)
+    assert error.data["code"] == ClientErrorCode.PROTOCOL_ERROR
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    assert disconnected.data["reason"] == DisconnectReason.CONNECTION_LOST
 
 
 # --------------------------------------------------------------------------- #
 # Heartbeat, silence detection, statistics
 # --------------------------------------------------------------------------- #
 def test_heartbeat_sends_ping_and_measures_rtt(
-        chat_client: ChatClient, server: FakeServer, events: queue.Queue[Event]) -> None:
-    connect(chat_client, events, server.port)
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
     wait_until(lambda: chat_client.get_stats()["avg_rtt_ms"] > 0)
     assert MessageType.PING in server.types_received()
-    stats_event = wait_for(events, EventType.STATS_UPDATED)
+    stats_event = wait_for(event_queue, EventType.STATS_UPDATED)
     stats_event.validate()
     assert stats_event.data["stats"]["packets_sent"] >= 1
 
 
 def test_silent_server_is_detected_as_lost(
-        chat_client: ChatClient, events: queue.Queue[Event]) -> None:
+        chat_client: ChatClient, event_queue: queue.Queue[Event]) -> None:
     """No packet for CONNECTION_TIMEOUT -> connection treated as dead."""
     fake = FakeServer(silent=True).start()
     try:
-        connect(chat_client, events, fake.port, auto_reconnect=False)
-        disconnected = wait_for(events, EventType.DISCONNECTED)
-        assert disconnected.data["reason"] == "timeout"
+        connect(chat_client, event_queue, fake.port, auto_reconnect=False)
+        disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+        assert disconnected.data["reason"] == DisconnectReason.TIMEOUT
     finally:
         fake.stop()
 
@@ -524,16 +515,64 @@ def test_set_network_conditions_is_kept_in_config(chat_client: ChatClient) -> No
 
 
 def test_every_published_event_has_required_keys(
-        bus: EventBus, chat_client: ChatClient, server: FakeServer,
-        events: queue.Queue[Event]) -> None:
+        event_bus: EventBus, chat_client: ChatClient, server: FakeServer,
+        event_queue: queue.Queue[Event]) -> None:
     published: list[Event] = []
-    bus.subscribe(None, published.append)
-    connect(chat_client, events, server.port)
+    event_bus.subscribe(None, published.append)
+    connect(chat_client, event_queue, server.port)
     chat_client.send_chat("contract")
-    wait_for(events, EventType.MESSAGE_RECEIVED)
-    wait_for(events, EventType.STATS_UPDATED)
+    wait_for(event_queue, EventType.MESSAGE_RECEIVED)
+    wait_for(event_queue, EventType.STATS_UPDATED)
     chat_client.disconnect()
-    wait_for(events, EventType.DISCONNECTED)
+    wait_for(event_queue, EventType.DISCONNECTED)
     assert len(published) >= 6
     for event in list(published):
         event.validate()
+        if event.type is EventType.DISCONNECTED:
+            # contract: the plain string value of a DisconnectReason, never free text
+            assert type(event.data["reason"]) is str
+            assert event.data["reason"] in {r.value for r in DisconnectReason}
+
+
+# --------------------------------------------------------------------------- #
+# Enum vocabularies (ByeReason, DisconnectReason, ClientErrorCode)
+# --------------------------------------------------------------------------- #
+def test_server_shutdown_bye_without_auto_reconnect_reports_server_shutdown(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port, auto_reconnect=False)
+    server.send_to_all(p.make_bye(ByeReason.SERVER_SHUTDOWN))
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    assert disconnected.data["reason"] == DisconnectReason.SERVER_SHUTDOWN
+
+
+def test_server_shutdown_bye_with_auto_reconnect_reconnects(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
+    server.send_to_all(p.make_bye(ByeReason.SERVER_SHUTDOWN))
+    wait_for_state(event_queue, ConnectionState.RECONNECTING)
+    wait_for(event_queue, EventType.CONNECTED)
+    assert chat_client.state is ConnectionState.CONNECTED
+
+
+def test_bye_with_unknown_reason_is_treated_as_server_shutdown(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port, auto_reconnect=False)
+    server.send_to_all(p.make_bye("maintenance"))
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    assert disconnected.data["reason"] == DisconnectReason.SERVER_SHUTDOWN
+
+
+@pytest.mark.parametrize("exc, code", [
+    (ConnectionRefusedError("refused"), ClientErrorCode.CONNECTION_REFUSED),
+    (TimeoutError("timed out"), ClientErrorCode.CONNECT_TIMEOUT),
+    (TransportTimeoutError("no WELCOME"), ClientErrorCode.CONNECT_TIMEOUT),
+    (ConnectionClosedError("closed"), ClientErrorCode.CONNECTION_LOST),
+    (ConnectionResetError("reset"), ClientErrorCode.CONNECTION_LOST),
+    (MalformedPacketError("bad magic"), ClientErrorCode.PROTOCOL_ERROR),
+    (BadChecksumError("crc"), ClientErrorCode.PROTOCOL_ERROR),
+    (InvalidStateError("not connected"), ClientErrorCode.INVALID_STATE),
+    (RuntimeError("bug"), ErrorCode.INTERNAL_ERROR),
+])
+def test_error_code_maps_exceptions_to_documented_codes(
+        exc: BaseException, code: str) -> None:
+    assert ChatClient._error_code(exc) == code
