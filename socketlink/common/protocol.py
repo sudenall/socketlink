@@ -28,6 +28,7 @@ from socketlink.common.constants import (
     MAX_PAYLOAD_SIZE,
     PROTOCOL_MAGIC,
     PROTOCOL_VERSION,
+    ByeReason,
     MessageType,
     PacketFlag,
 )
@@ -232,5 +233,6 @@ def make_error(code: str, message: str) -> Packet:
     return _json_packet(MessageType.ERROR, {"code": code, "message": message})
 
 
-def make_bye(reason: str = "client_quit") -> Packet:
-    return _json_packet(MessageType.BYE, {"reason": reason})
+def make_bye(reason: str = ByeReason.CLIENT_QUIT.value) -> Packet:
+    """`reason` may be a `ByeReason` member or its string value."""
+    return _json_packet(MessageType.BYE, {"reason": str(getattr(reason, "value", reason))})

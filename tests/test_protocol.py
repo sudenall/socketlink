@@ -15,6 +15,9 @@ from socketlink.common.constants import (
     HEADER_SIZE,
     MAX_PAYLOAD_SIZE,
     PROTOCOL_VERSION,
+    ByeReason,
+    ClientErrorCode,
+    ErrorCode,
     MessageType,
     PacketFlag,
 )
@@ -195,3 +198,23 @@ def test_summary_format() -> None:
     packet = p.make_chat("hi")
     packet.seq = 5
     assert packet.summary() == f"CHAT seq=5 ack=0 len={len(packet.payload)}"
+
+
+def test_bye_reason_values_match_the_spec() -> None:
+    assert {r.value for r in ByeReason} == {
+        "client_quit", "server_shutdown", "kicked_by_admin", "timeout",
+    }
+
+
+def test_make_bye_default_reason_is_client_quit() -> None:
+    assert p.make_bye().json_payload() == {"reason": "client_quit"}
+
+
+@pytest.mark.parametrize("reason", list(ByeReason))
+def test_make_bye_accepts_enum_member_and_plain_string(reason: ByeReason) -> None:
+    assert p.make_bye(reason).json_payload() == {"reason": reason.value}
+    assert p.make_bye(reason.value).json_payload() == {"reason": reason.value}
+
+
+def test_client_error_codes_do_not_collide_with_wire_error_codes() -> None:
+    assert {c.value for c in ClientErrorCode}.isdisjoint({c.value for c in ErrorCode})
