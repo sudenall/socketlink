@@ -8,12 +8,14 @@ Every server listens on port 0 so parallel runs never collide (D-15).
 from __future__ import annotations
 
 import queue
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 import pytest
 
+import socketlink.server.server as server_module
 from socketlink.common.config import ServerConfig
 from socketlink.common.constants import DisconnectReason, ErrorCode, MessageType
 from socketlink.common.events import Event, EventBus, EventType
@@ -280,3 +282,77 @@ def test_stop_is_idempotent_and_safe_before_start() -> None:
     server.stop()
     server.stop()
     assert not server.is_running
+
+
+def test_bye_survives_unread_client_data(env: Env) -> None:
+    """The client still has packets in flight when the server stops: no RST, BYE arrives."""
+    alice = env.join("alice")
+    for _ in range(50):
+        alice.send(make_ping())
+    env.server.stop()
+    while True:  # ConnectionClosedError here means the BYE was lost
+        packet = alice.receive(timeout=WAIT)
+        if packet.type is MessageType.BYE:
+            assert packet.json_payload()["reason"] == "server_shutdown"
+            return
+
+
+def test_server_waits_for_the_client_to_close_after_bye(env: Env) -> None:
+    alice = env.join("alice")
+    stopper = threading.Thread(target=env.server.stop)
+    stopper.start()
+    receive_type(alice, MessageType.BYE)
+    with pytest.raises(TransportTimeoutError):  # still open: the server drains, it does not hang up
+        alice.receive(timeout=0.3)
+    alice.close()
+    stopper.join(timeout=WAIT)
+    assert not stopper.is_alive()
+    wait_for_event(env.events, EventType.SERVER_STOPPED)
+
+
+def test_welcome_is_the_first_packet_even_during_a_broadcast(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alice = env.join("alice")
+    original = server_module.make_welcome
+
+    def slow_welcome(client_id: int, server_name: str, users: list[str]) -> Packet:
+        time.sleep(0.5)  # the newcomer is already registered while its WELCOME is delayed
+        return original(client_id, server_name, users)
+
+    monkeypatch.setattr(server_module, "make_welcome", slow_welcome)
+    late = env.connect()
+    late.send(make_hello("late"))
+    deadline = time.monotonic() + WAIT
+    while "late" not in [c.username for c in env.server.get_clients()]:
+        assert time.monotonic() < deadline, "late was never registered"
+        time.sleep(0.01)
+    alice.send(make_chat("said while late is joining"))
+    receive_type(alice, MessageType.CHAT)  # the broadcast is done
+    assert late.receive(timeout=WAIT).type is MessageType.WELCOME
+    expect_no_chat(late)
+
+
+def test_five_malformed_packets_in_a_row_close_the_connection(env: Env) -> None:
+    alice = env.join("alice")
+    for _ in range(5):
+        alice.send(Packet(MessageType.CHAT, payload=b"not json"))
+    errors = 0
+    with pytest.raises(ConnectionClosedError):
+        while True:
+            if alice.receive(timeout=WAIT).type is MessageType.ERROR:
+                errors += 1
+    assert errors == 5
+    left = wait_for_event(env.events, EventType.CLIENT_LEFT)
+    assert left.data["reason"] == DisconnectReason.REJECTED.value
+
+
+def test_a_valid_packet_resets_the_malformed_counter(env: Env) -> None:
+    alice = env.join("alice")
+    for _ in range(2):
+        for _ in range(4):
+            alice.send(Packet(MessageType.CHAT, payload=b"not json"))
+        alice.send(make_ping())
+        receive_type(alice, MessageType.PONG)
+    alice.send(make_ping())
+    receive_type(alice, MessageType.PONG)  # 8 bad packets in total, still connected

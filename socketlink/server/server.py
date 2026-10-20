@@ -42,6 +42,7 @@ from socketlink.common.exceptions import (
     ConnectionClosedError,
     MalformedPacketError,
     PayloadTooLargeError,
+    ProtocolError,
     TransportError,
     TransportTimeoutError,
     ValidationError,
@@ -62,6 +63,10 @@ from socketlink.common.transport import Address, Transport, TransportListener, c
 log = get_logger(__name__)
 
 _USERNAME_RE = re.compile(USERNAME_PATTERN)
+
+# PROTOCOL.md 7: this many MALFORMED_PACKETs in a row from one client close the connection.
+# TODO: move to constants.py once Sude adds it there (shared file).
+_MAX_CONSECUTIVE_MALFORMED = 5
 
 
 class RegistrationError(ValidationError):
@@ -105,7 +110,13 @@ class ClientHandler(threading.Thread):
         self.connected_at = time.time()
         self.last_seen = self.connected_at
         self._close_lock = threading.Lock()
-        self._is_closed = False
+        self._is_closed = False  # disconnect() ran: no more routing, no more receiving
+        self._transport_closed = False  # the socket itself was closed (after the BYE drain)
+        self._bye_sent = False
+        self._disconnect_done = threading.Event()  # BYE attempted and client unregistered
+        # True once WELCOME went out. Until then broadcasts skip this client, so that WELCOME
+        # is always its first packet (PROTOCOL.md 5.1).
+        self.ready = False
 
     # ---- thread body -----------------------------------------------------
     def run(self) -> None:
@@ -126,8 +137,10 @@ class ClientHandler(threading.Thread):
             reason = DisconnectReason.INTERNAL_ERROR
         finally:
             self.disconnect(reason)
+            self._finish_close()  # no-op if disconnect() already did it in this thread
 
     def _receive_loop(self) -> None:
+        malformed_in_a_row = 0
         while not self._is_closed:
             try:
                 packet = self.transport.receive(timeout=SOCKET_TIMEOUT)
@@ -137,9 +150,18 @@ class ClientHandler(threading.Thread):
             try:
                 self.handle_packet(packet)
             except MalformedPacketError as exc:
-                # Raised while reading the payload: the framing is fine, so keep the client.
+                # Raised while reading the payload: the framing is fine, so keep the client,
+                # unless it keeps doing this (PROTOCOL.md 7).
+                malformed_in_a_row += 1
                 log.warning("Bad %s payload from %s: %s", packet.type.name, self._label, exc)
                 self._send_error(ErrorCode.MALFORMED_PACKET, str(exc))
+                if malformed_in_a_row >= _MAX_CONSECUTIVE_MALFORMED:
+                    log.warning("Closing %s: %d malformed packets in a row", self._label,
+                                malformed_in_a_row)
+                    self.disconnect(DisconnectReason.REJECTED)
+                    return
+            else:
+                malformed_in_a_row = 0
 
     # ---- public API used by ChatServer -----------------------------------
     def send(self, packet: Packet) -> None:
@@ -156,6 +178,11 @@ class ClientHandler(threading.Thread):
 
         If `bye` is given it is sent first. `reason` ends up in the CLIENT_LEFT event,
         but only when the client had completed HELLO.
+
+        The client stops being routed to immediately. The socket is closed by the handler
+        thread (see `_finish_close`), after it has drained what the client still sends: closing
+        a socket that holds unread data makes the OS send RST instead of FIN, and the client
+        could lose our BYE.
         """
         with self._close_lock:
             if self._is_closed:
@@ -164,10 +191,37 @@ class ClientHandler(threading.Thread):
         if bye is not None:
             try:
                 self.transport.send(make_bye(bye))
+                self._bye_sent = True
             except TransportError as exc:
                 log.debug("BYE to %s was not delivered: %s", self._label, exc)
-        self.transport.close()
         self.server.unregister(self, reason.value)
+        self._disconnect_done.set()
+        if threading.current_thread() is self or not self.is_alive():
+            self._finish_close()
+        # Otherwise the handler thread notices _is_closed within SOCKET_TIMEOUT and finishes.
+
+    def _finish_close(self) -> None:
+        """Close the transport once, after draining incoming packets if a BYE was sent."""
+        # Another thread may still be inside disconnect() sending the BYE: never close under it.
+        self._disconnect_done.wait(timeout=CONNECT_TIMEOUT)
+        with self._close_lock:
+            if self._transport_closed:
+                return
+            self._transport_closed = True
+        if self._bye_sent:
+            self._drain_after_bye()
+        self.transport.close()
+
+    def _drain_after_bye(self) -> None:
+        """Read and discard packets until the client closes, for at most SOCKET_TIMEOUT."""
+        deadline = time.monotonic() + SOCKET_TIMEOUT
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                self.transport.receive(timeout=remaining)
+            except TransportTimeoutError:
+                return
+            except (TransportError, ProtocolError):
+                return  # closed by the client, or garbage: either way we are done
 
     def info(self) -> ClientInfo:
         """Snapshot for the dashboard (ChatServer.get_clients)."""
@@ -306,9 +360,9 @@ class ChatServer:
             handlers = list(self._handlers)
         if listener is None:
             return  # never started, or already stopped
-        listener.close()
-        for handler in handlers:
+        for handler in handlers:  # BYE first, the listener is closed afterwards
             handler.disconnect(DisconnectReason.SERVER_SHUTDOWN, bye=ByeReason.SERVER_SHUTDOWN)
+        listener.close()
         # Every thread notices within SOCKET_TIMEOUT; CONNECT_TIMEOUT is a generous cap so a
         # stuck thread can never freeze the dashboard.
         if accept_thread is not None:
@@ -384,6 +438,7 @@ class ChatServer:
             {"username": username, "address": handler.transport.peer_address},
         )
         handler.send(make_welcome(client_id, self.config.server_name, users))
+        handler.ready = True  # from now on broadcasts reach this client, after its WELCOME
         self._broadcast_user_list()
 
     def unregister(self, handler: ClientHandler, reason: str) -> None:
@@ -405,7 +460,7 @@ class ChatServer:
     def broadcast(self, packet: Packet, exclude: str | None = None) -> None:
         with self._clients_lock:
             skip = exclude.lower() if exclude is not None else None
-            targets = [h for key, h in self._clients.items() if key != skip]
+            targets = [h for key, h in self._clients.items() if key != skip and h.ready]
         for handler in targets:  # lock released: a slow client must not block the others
             handler.send(packet)
 
@@ -413,7 +468,7 @@ class ChatServer:
         """Return False if the user is not connected."""
         with self._clients_lock:
             handler = self._clients.get(username.lower())
-        if handler is None:
+        if handler is None or not handler.ready:
             return False
         handler.send(packet)
         return True
@@ -452,7 +507,7 @@ class ChatServer:
         """Send the current USER_LIST to everyone (a fresh snapshot, taken just now)."""
         with self._clients_lock:
             users = self._user_names_locked()
-            targets = list(self._clients.values())
+            targets = [h for h in self._clients.values() if h.ready]
         packet = make_user_list(users)
         for handler in targets:
             handler.send(packet)
