@@ -42,6 +42,7 @@ USERNAME_MIN_LENGTH = 3
 USERNAME_MAX_LENGTH = 16
 USERNAME_PATTERN = r"^[A-Za-z0-9_]{3,16}$"
 MAX_CHAT_LENGTH = 2000  # characters
+MAX_CONSECUTIVE_MALFORMED = 5  # MALFORMED_PACKETs in a row before the server closes
 
 # --------------------------------------------------------------------------- #
 # Timing (seconds unless the name says otherwise)

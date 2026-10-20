@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from socketlink.common.constants import (
+    MAX_CONSECUTIVE_MALFORMED,
     ByeReason,
     ClientErrorCode,
     DisconnectReason,
@@ -58,3 +59,7 @@ def test_file_fail_reason_values_are_the_documented_set() -> None:
         "file_too_large", "bad_packet", "bad_chunk", "transfer_id_conflict",
         "missing_chunks", "checksum_mismatch", "write_error", "connection_lost",
     }
+
+
+def test_malformed_limit_matches_the_spec_value() -> None:
+    assert MAX_CONSECUTIVE_MALFORMED == 5  # docs/PROTOCOL.md section 7

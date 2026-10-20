@@ -1,6 +1,6 @@
 # SocketLink Protokol Spesifikasyonu (v1)
 
-> **Sahibi:** Sude · **Durum:** **Dondurulmuş (v1.0, 2026-10-20)**
+> **Sahibi:** Sude · **Durum:** **Dondurulmuş (v1.0, 2026-10-20; v1.0.1 açıklamalar)**
 >
 > Bu doküman bütün ekibin uyduğu **sözleşmedir**. Server, client, UDP katmanı, dosya transferi ve testler bu dosyaya göre yazılır. Kodda bu dokümanla çelişen bir şey varsa **doküman doğrudur**, kod düzeltilir. Protokolde bir değişiklik gerekiyorsa önce bu dosya PR ile değiştirilir, sonra kod.
 >
@@ -182,6 +182,7 @@ TCP modunda TCP zaten güvenilirlik sağlar; uygulama seviyesinde **ACK kullanı
 - `ACK(ack=n)` gelince `n`'e kadar (dahil) bütün paketler onaylanmış sayılır (cumulative). `base = n + 1`.
 - `RETRANSMIT_TIMEOUT = 0.5 s` dolarsa pencerenin **tamamı** yeniden gönderilir (`flags |= RETRANSMISSION`), `retransmissions` artar, `PACKET_RETRANSMITTED` yayınlanır.
 - Aynı paket için `MAX_RETRIES = 8` aşılırsa → bağlantı kapatılır, `TransportTimeoutError`.
+  - Hata **`send()`** çağrısından `TransportTimeoutError` olarak gelir. Bağlantı kapandığı için **`receive()`** `ConnectionClosedError` fırlatır: `receive()` içindeki `TransportTimeoutError` "süre doldu, döngüye devam" demektir (bkz. §7.1), ölü bir bağlantıda döngüyü bitirmez.
 
 **Alıcı**
 - `expected_seq` 1'den başlar.
@@ -204,7 +205,7 @@ TCP modunda TCP zaten güvenilirlik sağlar; uygulama seviyesinde **ACK kullanı
 | Kod | Ne zaman | Python hatası | Sunucu ne yapar |
 |---|---|---|---|
 | `BAD_CHECKSUM` | Checksum tutmadı | `BadChecksumError` — **TCP transport'u içinde yakalanır**, `receive()` fırlatmaz: paket atılır, `checksum_errors` artar, `PACKET_CORRUPTED` yayınlanır | Paketi atar, bağlantı açık kalır |
-| `MALFORMED_PACKET` | Magic/uzunluk/tip/JSON hatalı | `MalformedPacketError` (`receive()`, `Packet.decode()` veya `json_payload()`) | Hata bildirir; aynı client'tan 5 kez üst üste → kapatır. TCP'de başlık bozuksa akış hizalanamaz, bu yüzden pratikte kapatmak en güvenlisi |
+| `MALFORMED_PACKET` | Magic/uzunluk/tip/JSON hatalı | `MalformedPacketError` (`receive()`, `Packet.decode()` veya `json_payload()`) | Hata bildirir; aynı client'tan `MAX_CONSECUTIVE_MALFORMED` (5) kez üst üste → kapatır. TCP'de başlık bozuksa akış hizalanamaz, bu yüzden pratikte kapatmak en güvenlisi |
 | `VERSION_MISMATCH` | Farklı protokol sürümü | `VersionMismatchError` (`receive()`) | Hata bildirir, kapatır |
 | `NOT_AUTHENTICATED` | HELLO'dan önce başka paket | — | Hata bildirir, kapatır |
 | `INVALID_USERNAME` | Kural dışı kullanıcı adı | — (`ValidationError` yalnızca client tarafındaki girdi kontrolünde) | Hata bildirir, kapatır |
@@ -231,3 +232,4 @@ Bunlar protokol hatası değil, **bağlantı durumudur**; `ERROR` paketine karş
 | v1-draft | 2026-10-19 | Sude | §4: BYE nedenleri için `ByeReason` enum'u (`constants.py`), değerler aynı |
 | v1-draft | 2026-10-19 | Sude | §7: her hata kodu için "Python hatası" sütunu, §7.1 bağlantı durumu hataları eklendi (davranış değişmedi) |
 | v1.0 | 2026-10-20 | Sude | Dondurulmuş. İçerik v1-draft ile aynı; kod ile belge tutarlılığı kontrol edildi (tip numaraları, sabitler, alan adları, hata kodları) |
+| v1.0.1 | 2026-10-20 | Sude | Açıklama eklendi, davranış değişmedi: §6 `MAX_RETRIES` aşımında `send()` / `receive()` hataları, §7 `MAX_CONSECUTIVE_MALFORMED` sabiti |
