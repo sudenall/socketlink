@@ -170,6 +170,35 @@ def test_listener_creates_one_session_per_address(
     server_side.close()
 
 
+def test_listener_close_during_hello_does_not_queue_new_session(
+    listener: ReliableUdpListener, fake_peer: socket.socket, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hello = p.make_hello("bob")
+    entered_check = threading.Event()
+    resume_check = threading.Event()
+
+    def wait_for_hello(data: bytes) -> bool:
+        entered_check.set()
+        assert resume_check.wait(RECEIVE_TIMEOUT)
+        return True
+
+    monkeypatch.setattr(
+        ReliableUdpListener, "_is_new_session", staticmethod(wait_for_hello)
+    )
+    routing = threading.Thread(
+        target=listener._route, args=(hello.encode(), fake_peer.getsockname())
+    )
+    routing.start()
+    assert entered_check.wait(RECEIVE_TIMEOUT)
+    listener.close()
+    resume_check.set()
+    routing.join(timeout=RECEIVE_TIMEOUT)
+
+    assert not routing.is_alive()
+    assert listener._pending.empty()
+    assert not listener._sessions
+
+
 def test_create_functions_return_udp_objects_in_udp_mode() -> None:
     udp_listener = create_listener(TransportMode.UDP)
     assert isinstance(udp_listener, ReliableUdpListener)
@@ -619,7 +648,7 @@ def test_internal_error_in_a_network_thread_is_reported_and_closes(pair) -> None
     client._handle_datagram = explode  # type: ignore[method-assign]
     server_side.send(chat(0))
     with pytest.raises(ConnectionClosedError):
-        client.receive(timeout=RECEIVE_TIMEOUT)
+        client.receive(timeout=GIVE_UP_TIME)
     errors = []
     while not events.empty():
         event = events.get_nowait()
