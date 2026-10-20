@@ -57,6 +57,9 @@ class EventType(str, Enum):
 
 
 # Required keys of Event.data for each EventType (the contract between core and GUI).
+# `reason` of DISCONNECTED, CLIENT_LEFT and SERVER_STOPPED must be a DisconnectReason value
+# (constants.py); `reason` of FILE_FAILED must be a FileFailReason value. Publish
+# `Enum.X.value`, never a free-form string. PACKET_CORRUPTED uses "checksum" or "malformed".
 EVENT_DATA_KEYS: dict[EventType, tuple[str, ...]] = {
     EventType.CONNECTED: ("host", "port", "mode", "username", "client_id"),
     EventType.DISCONNECTED: ("reason",),

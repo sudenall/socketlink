@@ -108,7 +108,7 @@ Alan isimleri **snake_case** ve tam olarak aşağıdaki gibidir. `timestamp` her
 { "code": "USERNAME_TAKEN", "message": "Username 'sude' is already in use." }
 
 // BYE (↔)
-{ "reason": "client_quit" }    // client_quit | server_shutdown | kicked_by_admin | timeout
+{ "reason": "client_quit" }    // client_quit | server_shutdown | kicked_by_admin | timeout (kodda: ByeReason)
 ```
 
 **FILE_CHUNK payload (ham):**
@@ -197,22 +197,34 @@ TCP modunda TCP zaten güvenilirlik sağlar; uygulama seviyesinde **ACK kullanı
 
 ## 7. Hata kodları
 
-| Kod | Ne zaman | Sunucu ne yapar |
+"Python hatası" sütunu, `transport.receive()` / `Packet.decode()` çağıran kodun **hangi exception'ı yakalayacağını** gösterir. `—` olan satırlar paket ayrıştırma hatası değil, sunucunun kendi kuralıdır (exception yok; sunucu doğrudan `ERROR` paketi üretir).
+
+| Kod | Ne zaman | Python hatası | Sunucu ne yapar |
+|---|---|---|---|
+| `BAD_CHECKSUM` | Checksum tutmadı | `BadChecksumError` — **TCP transport'u içinde yakalanır**, `receive()` fırlatmaz: paket atılır, `checksum_errors` artar, `PACKET_CORRUPTED` yayınlanır | Paketi atar, bağlantı açık kalır |
+| `MALFORMED_PACKET` | Magic/uzunluk/tip/JSON hatalı | `MalformedPacketError` (`receive()`, `Packet.decode()` veya `json_payload()`) | Hata bildirir; aynı client'tan 5 kez üst üste → kapatır. TCP'de başlık bozuksa akış hizalanamaz, bu yüzden pratikte kapatmak en güvenlisi |
+| `VERSION_MISMATCH` | Farklı protokol sürümü | `VersionMismatchError` (`receive()`) | Hata bildirir, kapatır |
+| `NOT_AUTHENTICATED` | HELLO'dan önce başka paket | — | Hata bildirir, kapatır |
+| `INVALID_USERNAME` | Kural dışı kullanıcı adı | — (`ValidationError` yalnızca client tarafındaki girdi kontrolünde) | Hata bildirir, kapatır |
+| `USERNAME_TAKEN` | Ad kullanımda | — | Hata bildirir, kapatır |
+| `UNKNOWN_USER` | `to` kullanıcısı yok | — | Yalnızca hata bildirir |
+| `PAYLOAD_TOO_LARGE` | `length > MAX_PAYLOAD_SIZE` | `PayloadTooLargeError` (`receive()` başlıkta yakalar, payload'u okumaz; `send()` ve `encode()` da fırlatır) | Hata bildirir, kapatır (TCP akışı artık güvenilmez) |
+| `SERVER_FULL` | `MAX_CLIENTS` doldu | — | Hata bildirir, kapatır |
+| `FILE_REJECTED` | Dosya kurallara uymuyor | — | Yalnızca hata bildirir |
+| `INTERNAL_ERROR` | Beklenmeyen sunucu hatası | herhangi biri | Loglar, hata bildirir |
+
+### 7.1 Bağlantı durumu hataları (`receive()` / `send()`)
+Bunlar protokol hatası değil, **bağlantı durumudur**; `ERROR` paketine karşılık gelmezler.
+
+| Python hatası | Anlamı | Ne yapılır |
 |---|---|---|
-| `BAD_CHECKSUM` | Checksum tutmadı | Paketi atar, (TCP'de) hata bildirir, bağlantı açık kalır |
-| `MALFORMED_PACKET` | Magic/uzunluk/JSON hatalı | Hata bildirir; aynı client'tan 5 kez üst üste → kapatır |
-| `VERSION_MISMATCH` | Farklı protokol sürümü | Hata bildirir, kapatır |
-| `NOT_AUTHENTICATED` | HELLO'dan önce başka paket | Hata bildirir, kapatır |
-| `INVALID_USERNAME` | Kural dışı kullanıcı adı | Hata bildirir, kapatır |
-| `USERNAME_TAKEN` | Ad kullanımda | Hata bildirir, kapatır |
-| `UNKNOWN_USER` | `to` kullanıcısı yok | Yalnızca hata bildirir |
-| `PAYLOAD_TOO_LARGE` | `length > MAX_PAYLOAD_SIZE` | Hata bildirir, kapatır (TCP akışı artık güvenilmez) |
-| `SERVER_FULL` | `MAX_CLIENTS` doldu | Hata bildirir, kapatır |
-| `FILE_REJECTED` | Dosya kurallara uymuyor | Yalnızca hata bildirir |
-| `INTERNAL_ERROR` | Beklenmeyen sunucu hatası | Loglar, hata bildirir |
+| `TransportTimeoutError` | `receive(timeout)` süresinde tam paket gelmedi | Hata değil; döngüye devam et, `CONNECTION_TIMEOUT` kontrolünü yap. Yarım gelen byte'lar kaybolmaz |
+| `ConnectionClosedError` | Karşı taraf kapattı, bağlantı koptu veya `close()` çağrıldı | Client'ı listeden çıkar (`CLIENT_LEFT`) / yeniden bağlan |
 
 ## 8. Değişiklik geçmişi
 
 | Sürüm | Tarih | Kim | Değişiklik |
 |---|---|---|---|
 | v1-draft | 2026-10-17 | Sude | İlk taslak |
+| v1-draft | 2026-10-19 | Sude | §4: BYE nedenleri için `ByeReason` enum'u (`constants.py`), değerler aynı |
+| v1-draft | 2026-10-19 | Sude | §7: her hata kodu için "Python hatası" sütunu, §7.1 bağlantı durumu hataları eklendi (davranış değişmedi) |

@@ -28,3 +28,14 @@ results/raw/
 # Draw.io backup files
 *.drawio.bkp
 *.drawio.dtmp
+
+# AI agent config (never commit)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.cursor/
+.cursorrules
+.aider*
+.windsurfrules
+.github/copilot-instructions.md
