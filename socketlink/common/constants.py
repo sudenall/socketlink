@@ -6,6 +6,8 @@ RULE: Never hard-code any of these values in another module. Import them from he
       module depends on it.
 """
 
+from __future__ import annotations
+
 from enum import Enum, IntEnum
 
 # --------------------------------------------------------------------------- #
@@ -113,6 +115,84 @@ class ErrorCode(str, Enum):
     SERVER_FULL = "SERVER_FULL"
     FILE_REJECTED = "FILE_REJECTED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class ClientErrorCode(str, Enum):
+    """`code` of an ERROR *event* raised on the client side. Never sent over the wire.
+
+    Server-sent ERROR packets use `ErrorCode`; these cover failures the client detects
+    itself, so GUIs can map a code to a friendly message instead of a Python class name.
+    """
+
+    CONNECTION_REFUSED = "CONNECTION_REFUSED"  # nobody is listening on host:port
+    CONNECT_TIMEOUT = "CONNECT_TIMEOUT"        # no TCP connection or no WELCOME in time
+    CONNECTION_LOST = "CONNECTION_LOST"        # reset, EOF or heartbeat timeout
+    PROTOCOL_ERROR = "PROTOCOL_ERROR"          # malformed or unexpected packet from the server
+    INVALID_STATE = "INVALID_STATE"            # operation not allowed in this ConnectionState
+
+
+class ByeReason(str, Enum):
+    """`reason` field of a BYE payload (docs/PROTOCOL.md section 4)."""
+
+    CLIENT_QUIT = "client_quit"
+    SERVER_SHUTDOWN = "server_shutdown"
+    KICKED_BY_ADMIN = "kicked_by_admin"
+    TIMEOUT = "timeout"
+
+
+class DisconnectReason(str, Enum):
+    """`reason` of DISCONNECTED, CLIENT_LEFT and SERVER_STOPPED events.
+
+    The ONLY allowed values for those events (see docs/ARCHITECTURE.md, "Olay veri
+    sozlesmesi"). GUIs map each member to a user-friendly sentence. The detail of why a
+    connection failed or was rejected travels in a separate ERROR event.
+    """
+
+    USER = "user"                        # the user (or admin on server stop) ended it normally
+    SERVER_SHUTDOWN = "server_shutdown"  # the server closed all connections
+    KICKED_BY_ADMIN = "kicked_by_admin"  # an admin removed this client
+    TIMEOUT = "timeout"                  # no traffic for CONNECTION_TIMEOUT
+    CONNECTION_LOST = "connection_lost"  # reset, EOF or I/O error without a BYE
+    REJECTED = "rejected"                # the server refused HELLO (reason in the ERROR event)
+    CONNECT_FAILED = "connect_failed"    # the connection could not be established
+    INTERNAL_ERROR = "internal_error"    # unexpected exception inside SocketLink
+
+    @classmethod
+    def from_bye(cls, reason: str) -> DisconnectReason:
+        """Translate the `reason` of a received BYE payload.
+
+        An unknown or missing BYE reason means the server ended the session, so it maps
+        to SERVER_SHUTDOWN.
+        """
+        mapping = {
+            ByeReason.CLIENT_QUIT.value: cls.USER,
+            ByeReason.SERVER_SHUTDOWN.value: cls.SERVER_SHUTDOWN,
+            ByeReason.KICKED_BY_ADMIN.value: cls.KICKED_BY_ADMIN,
+            ByeReason.TIMEOUT.value: cls.TIMEOUT,
+        }
+        return mapping.get(str(getattr(reason, "value", reason)), cls.SERVER_SHUTDOWN)
+
+
+class FileFailReason(str, Enum):
+    """`reason` of FILE_FAILED events (both directions). The ONLY allowed values.
+
+    Values come from the list Tina documented in transfer/file_transfer.py.
+    """
+
+    # upload (FileSender)
+    INVALID_FILE = "invalid_file"          # missing, empty, directory or too large to start
+    READ_ERROR = "read_error"              # the local file could not be read
+    SEND_ERROR = "send_error"              # the transport failed while sending
+    CANCELLED = "cancelled"                # the user cancelled the transfer
+    # download (FileReceiver)
+    FILE_TOO_LARGE = "file_too_large"      # announced size exceeds MAX_FILE_SIZE
+    BAD_PACKET = "bad_packet"              # FILE_* packet with missing/invalid fields
+    BAD_CHUNK = "bad_chunk"                # chunk index out of range or wrong size
+    TRANSFER_ID_CONFLICT = "transfer_id_conflict"  # same (sender, transfer_id) started twice
+    MISSING_CHUNKS = "missing_chunks"      # FILE_END arrived before all chunks
+    CHECKSUM_MISMATCH = "checksum_mismatch"  # whole-file CRC32 differs
+    WRITE_ERROR = "write_error"            # the file could not be written to disk
+    CONNECTION_LOST = "connection_lost"    # the connection died during the transfer
 
 
 class TransportMode(str, Enum):

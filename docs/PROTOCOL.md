@@ -1,8 +1,10 @@
 # SocketLink Protokol Spesifikasyonu (v1)
 
-> **Sahibi:** Sude · **Durum:** Taslak → 1. haftanın sonunda grup onayıyla "Dondurulmuş"
+> **Sahibi:** Sude · **Durum:** **Dondurulmuş (v1.0, 2026-10-20)**
 >
 > Bu doküman bütün ekibin uyduğu **sözleşmedir**. Server, client, UDP katmanı, dosya transferi ve testler bu dosyaya göre yazılır. Kodda bu dokümanla çelişen bir şey varsa **doküman doğrudur**, kod düzeltilir. Protokolde bir değişiklik gerekiyorsa önce bu dosya PR ile değiştirilir, sonra kod.
+>
+> **Dondurulmuş ne demek?** Paket formatı, mesaj tipi numaraları, payload alan adları ve hata kodları bu sürümde sabittir. Değişiklik gerekirse: (1) haftalık toplantıda ya da `#duyurular`'da konuşulur, (2) bu dosya PR ile güncellenir ve sürüm numarası artar (geriye uyumlu eklemeler v1.1, v1.2…; uyumsuz değişiklik v2), (3) ancak ondan sonra kod değişir. Yeni mesaj tipi 13'ten devam eder, mevcut numaralar asla değişmez.
 
 ---
 
@@ -108,7 +110,7 @@ Alan isimleri **snake_case** ve tam olarak aşağıdaki gibidir. `timestamp` her
 { "code": "USERNAME_TAKEN", "message": "Username 'sude' is already in use." }
 
 // BYE (↔)
-{ "reason": "client_quit" }    // client_quit | server_shutdown | kicked_by_admin | timeout
+{ "reason": "client_quit" }    // client_quit | server_shutdown | kicked_by_admin | timeout (kodda: ByeReason)
 ```
 
 **FILE_CHUNK payload (ham):**
@@ -226,4 +228,6 @@ Bunlar protokol hatası değil, **bağlantı durumudur**; `ERROR` paketine karş
 | Sürüm | Tarih | Kim | Değişiklik |
 |---|---|---|---|
 | v1-draft | 2026-10-17 | Sude | İlk taslak |
+| v1-draft | 2026-10-19 | Sude | §4: BYE nedenleri için `ByeReason` enum'u (`constants.py`), değerler aynı |
 | v1-draft | 2026-10-19 | Sude | §7: her hata kodu için "Python hatası" sütunu, §7.1 bağlantı durumu hataları eklendi (davranış değişmedi) |
+| v1.0 | 2026-10-20 | Sude | Dondurulmuş. İçerik v1-draft ile aynı; kod ile belge tutarlılığı kontrol edildi (tip numaraları, sabitler, alan adları, hata kodları) |
