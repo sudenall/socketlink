@@ -339,7 +339,10 @@ class ChatClient:
         config = self.config
         transport = create_transport(config.mode, config.host, config.port, self.event_bus)
         try:
+            # Before HELLO: on reliable UDP the HELLO itself already goes through the
+            # simulator and the Go-Back-N window.
             transport.set_network_conditions(config.loss_rate, config.delay_ms)
+            self._apply_window_size(transport, config.window_size)
             transport.send(make_hello(config.username))
             deadline = time.monotonic() + CONNECT_TIMEOUT
             while True:
@@ -431,6 +434,20 @@ class ChatClient:
                 transport.receive(timeout=remaining)
             except (SocketLinkError, OSError):
                 return  # closed by the server (expected), timeout, or broken stream
+
+    @staticmethod
+    def _apply_window_size(transport: Transport, window_size: int) -> None:
+        """Pass ClientConfig.window_size to the transport (reliable UDP only).
+
+        Only ReliableUdpTransport has set_window_size(); the Transport interface does
+        not, and checking the mode here is forbidden (README 9.3), so the method is
+        looked up instead. TCP has no window to set.
+        TODO(Hamit): call transport.set_window_size() directly once Transport has a
+        no-op default like set_network_conditions().
+        """
+        set_window_size = getattr(transport, "set_window_size", None)
+        if set_window_size is not None:
+            set_window_size(window_size)
 
     def _close_transport(self) -> None:
         transport = self._transport

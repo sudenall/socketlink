@@ -41,7 +41,7 @@ from socketlink.common.exceptions import (
     TransportTimeoutError,
     ValidationError,
 )
-from socketlink.common.transport import TcpListener, Transport
+from socketlink.common.transport import TcpListener, TcpTransport, Transport
 from tests.conftest import wait_for_event
 
 pytestmark = pytest.mark.integration
@@ -576,3 +576,52 @@ def test_bye_with_unknown_reason_is_treated_as_server_shutdown(
 def test_error_code_maps_exceptions_to_documented_codes(
         exc: BaseException, code: str) -> None:
     assert ChatClient._error_code(exc) == code
+
+
+# --------------------------------------------------------------------------- #
+# window_size (reliable UDP setting, must reach the transport)
+# --------------------------------------------------------------------------- #
+class _WindowedTcpTransport(TcpTransport):
+    """TcpTransport plus the set_window_size() that only ReliableUdpTransport has.
+
+    Records the calls, so the test can check ChatClient forwards ClientConfig.window_size
+    without depending on the reliable UDP implementation.
+    """
+
+    window_sizes: list[int] = []
+    network_conditions: list[tuple[float, int]] = []
+
+    def set_window_size(self, window_size: int) -> None:
+        self.window_sizes.append(window_size)
+
+    def set_network_conditions(self, loss_rate: float = 0.0, delay_ms: int = 0) -> None:
+        self.network_conditions.append((loss_rate, delay_ms))
+
+
+def test_window_size_and_network_conditions_reach_the_transport(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    _WindowedTcpTransport.window_sizes = []
+    _WindowedTcpTransport.network_conditions = []
+    monkeypatch.setattr(
+        client_module, "create_transport",
+        lambda mode, host, port, bus: _WindowedTcpTransport.connect(host, port, bus),
+    )
+    connect(chat_client, event_queue, server.port, window_size=8, loss_rate=0.1, delay_ms=50)
+    assert _WindowedTcpTransport.window_sizes == [8]
+    assert _WindowedTcpTransport.network_conditions == [(0.1, 50)]
+
+
+def test_window_size_is_applied_again_after_reconnect(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    _WindowedTcpTransport.window_sizes = []
+    monkeypatch.setattr(
+        client_module, "create_transport",
+        lambda mode, host, port, bus: _WindowedTcpTransport.connect(host, port, bus),
+    )
+    connect(chat_client, event_queue, server.port, window_size=2)
+    server.drop_clients()
+    wait_for_state(event_queue, ConnectionState.RECONNECTING)
+    wait_for(event_queue, EventType.CONNECTED)
+    assert _WindowedTcpTransport.window_sizes == [2, 2]
