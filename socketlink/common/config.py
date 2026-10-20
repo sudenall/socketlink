@@ -41,11 +41,12 @@ def _validate_ip_or_host(host: str) -> None:
 
 
 def _validate_port(port: int) -> None:
-    """Validate that port is an integer between 1024 and 65535."""
+    """Validate that port is an integer between 1024 and 65535, or 0 for OS-assigned port."""
     if isinstance(port, bool) or not isinstance(port, int):
         raise ValidationError(f"Port must be an integer, got {type(port).__name__}.")
-    if not (1024 <= port <= 65535):
-        raise ValidationError(f"Port must be between 1024 and 65535, got {port}.")
+    # Port 0 is allowed for dynamic/ephemeral OS-assigned port binding in tests (D-15).
+    if port != 0 and not (1024 <= port <= 65535):
+        raise ValidationError(f"Port must be 0 or between 1024 and 65535, got {port}.")
 
 
 def _validate_udp_params(loss_rate: float, delay_ms: int, window_size: int) -> None:
@@ -191,7 +192,9 @@ class ClientConfig:
         _validate_port(self.port)
         self.mode = _normalize_mode(self.mode)
 
-        if not isinstance(self.username, str) or not re.match(USERNAME_PATTERN, self.username):
+        if not isinstance(self.username, str) or not re.fullmatch(
+            USERNAME_PATTERN, self.username
+        ):
             raise ValidationError(
                 f"Invalid username '{self.username}': must match regex {USERNAME_PATTERN} "
                 "(3-16 alphanumeric characters or underscores)."

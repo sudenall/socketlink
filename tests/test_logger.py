@@ -94,6 +94,18 @@ class TestLogger(unittest.TestCase):
             root = logging.getLogger("socketlink")
             root.removeHandler(handler)
 
+    def test_attach_event_bus_handler_idempotent(self) -> None:
+        bus = EventBus()
+        h1 = attach_event_bus_handler(bus, level=logging.INFO)
+        h2 = attach_event_bus_handler(bus, level=logging.DEBUG)
+        try:
+            self.assertIs(h1, h2)
+            self.assertEqual(h1.level, logging.DEBUG)
+        finally:
+            root = logging.getLogger("socketlink")
+            root.removeHandler(h1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

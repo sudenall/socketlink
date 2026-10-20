@@ -58,12 +58,17 @@ class TestServerConfig(unittest.TestCase):
         cfg.validate()
 
     def test_invalid_port_raises_validation_error(self) -> None:
-        invalid_ports = [0, 80, 1023, 65536, 100000, -1]
+        invalid_ports = [80, 1023, 65536, 100000, -1]
         for port in invalid_ports:
             with self.subTest(port=port):
                 cfg = ServerConfig(port=port)
                 with self.assertRaises(ValidationError):
                     cfg.validate()
+
+    def test_port_zero_is_accepted_for_ephemeral_binding(self) -> None:
+        cfg = ServerConfig(port=0)
+        cfg.validate()
+        self.assertEqual(cfg.port, 0)
 
     def test_invalid_max_clients(self) -> None:
         invalid_counts = [0, -5, MAX_CLIENTS + 1, 100]
@@ -136,6 +141,7 @@ class TestClientConfig(unittest.TestCase):
             "user-name",     # hyphen not allowed by pattern ^[A-Za-z0-9_]{3,16}$
             "toolongusernameexceeds16",  # >16
             "has space",
+            "alice\n",       # trailing newline rejected by re.fullmatch
         ]
         for name in invalid_usernames:
             with self.subTest(username=name):

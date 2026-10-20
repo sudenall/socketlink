@@ -89,9 +89,17 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def attach_event_bus_handler(event_bus: EventBus, level: int = logging.INFO) -> EventBusLogHandler:
-    """Attach an EventBusLogHandler to the root 'socketlink' logger and return it."""
+    """Attach an EventBusLogHandler to the root 'socketlink' logger and return it.
+
+    If an EventBusLogHandler for this event_bus is already registered, updates its
+    level and returns the existing handler to prevent duplicate event publishing.
+    """
     _configure_root()
     root = logging.getLogger("socketlink")
+    for handler in root.handlers:
+        if isinstance(handler, EventBusLogHandler) and handler.event_bus is event_bus:
+            handler.setLevel(level)
+            return handler
     handler = EventBusLogHandler(event_bus, level=level)
     root.addHandler(handler)
     return handler
