@@ -46,6 +46,16 @@ def run_series(measure: Callable[[], float], repeats: int = REPEATS) -> Summary:
     return summarize([measure() for _ in range(repeats)])
 
 
+def collect(
+    measure: Callable[[], Mapping[str, float]], repeats: int = REPEATS
+) -> dict[str, Summary]:
+    """Like run_series, for a measurement that returns several named numbers per run."""
+    if repeats < 1:
+        raise ValueError("repeats must be >= 1")
+    runs = [measure() for _ in range(repeats)]
+    return {name: summarize([run[name] for run in runs]) for name in runs[0]}
+
+
 def summary_columns(metric: str, summary: Summary) -> dict[str, float | int]:
     """CSV columns for one metric: <metric>_mean, <metric>_std, runs."""
     return {
