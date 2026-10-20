@@ -231,6 +231,25 @@ def test_log_error_and_stats_events_are_shown(root: tk.Tk) -> None:
     assert app.stat_labels["retransmissions"].cget("text") == "0"
 
 
+def test_failing_event_does_not_stop_polling(root: tk.Tk,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _app(root)
+    handled: list[EventType] = []
+
+    def handle(event: Event) -> None:
+        if event.type == EventType.ERROR:
+            raise KeyError("unknown code")
+        handled.append(event.type)
+
+    monkeypatch.setattr(app, "_handle_event", handle)
+    app.event_bus.publish(Event(EventType.ERROR, {"code": "NEW_CODE", "message": "x"}))
+    app.event_bus.publish(Event(EventType.LOG, {"level": "INFO", "message": "after"}))
+    app._poll_events()
+    assert handled == [EventType.LOG]
+    assert app._poll_after_id is not None
+    app.on_close()
+
+
 def test_log_keeps_only_last_lines(root: tk.Tk) -> None:
     app = _app(root)
     for number in range(server_gui._MAX_LOG_LINES + 50):

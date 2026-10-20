@@ -45,9 +45,12 @@ from socketlink.common.constants import (
 )
 from socketlink.common.events import Event, EventBus, EventType
 from socketlink.common.exceptions import ValidationError
+from socketlink.common.logger import get_logger
 from socketlink.common.stats import TransportStats
 from socketlink.gui import theme
 from socketlink.server.server import ChatServer, ClientInfo
+
+log = get_logger(__name__)
 
 # Same limit as the client packet log (README section 7).
 # TODO(Sude): move to constants.py as MAX_LOG_LINES if approved.
@@ -69,10 +72,10 @@ _STAT_ROWS = (
     ("bytes_sent", "Bytes sent"),
     ("bytes_received", "Bytes received"),
     ("retransmissions", "Retransmissions"),
-    ("packets_dropped_simulated", "Dropped (simulated)"),
-    ("duplicates_received", "Duplicates"),
+    ("packets_dropped_simulated", "Simulated drops"),
+    ("duplicates_received", "Duplicates received"),
     ("checksum_errors", "Checksum errors"),
-    ("avg_rtt_ms", "Avg RTT (ms)"),
+    ("avg_rtt_ms", "Average RTT (ms)"),
 )
 
 
@@ -344,12 +347,19 @@ class ServerApp:
 
     # ---- events ------------------------------------------------------------------
     def _poll_events(self) -> None:
-        """Drain self.events without blocking, then reschedule with root.after."""
-        try:
-            while True:
-                self._handle_event(self.events.get_nowait())
-        except queue.Empty:
-            pass
+        """Drain self.events without blocking, then reschedule with root.after.
+
+        A failing event is logged and skipped, so one bad event never stops the polling.
+        """
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._handle_event(event)
+            except Exception:  # noqa: BLE001 - keep the dashboard alive, the error is logged
+                log.exception("Could not show %s event", event.type.value)
         self._poll_after_id = self.root.after(GUI_POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, event: Event) -> None:
