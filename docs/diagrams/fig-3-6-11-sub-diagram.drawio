@@ -1,0 +1,164 @@
+<mxfile host="Electron" modified="2026-10-18T20:00:00.000Z" agent="Mozilla/5.0" version="21.6.8" type="device">
+  <diagram id="HLD3" name="Detailed Network Sub-Diagram">
+    <mxGraphModel dx="1400" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1000" background="#ffffff" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- SECTION 1: PACKET HEADER SPECIFICATION -->
+        <mxCell id="header_title" value="PART A: SOCKETLINK PACKET FORMAT (22-BYTE FIXED BINARY HEADER + PAYLOAD)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="60" y="30" width="800" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- Header Fields (22 Bytes total) -->
+        <mxCell id="f_magic" value="Magic (2 B)&#xa;b'SL'" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="65" width="80" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_ver" value="Ver (1 B)&#xa;1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="140" y="65" width="60" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_type" value="Type (1 B)&#xa;1..12" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="200" y="65" width="70" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_flags" value="Flags (1 B)&#xa;ACK / RETX" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="65" width="80" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_res" value="Res (1 B)&#xa;0x00" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="65" width="60" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_seq" value="Sequence No (4 B)&#xa;uint32 (seq)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="410" y="65" width="130" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_ack" value="Ack No (4 B)&#xa;uint32 (ack)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="540" y="65" width="130" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_len" value="Length (4 B)&#xa;uint32 (payload len)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="670" y="65" width="130" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_crc" value="CRC32 Checksum (4 B)&#xa;zlib.crc32(header[0:18] + payload)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="800" y="65" width="190" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="f_payload" value="Variable-Length Payload (0 to 60,000 Bytes)&#xa;UTF-8 JSON (CHAT, USER_LIST, ERROR) or Raw Binary (FILE_CHUNK with 8B prefix)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f3f4f6;strokeColor=#9ca3af;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="125" width="930" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- SECTION 2: RELIABLE UDP GO-BACK-N TIMELINE -->
+        <mxCell id="gbn_title" value="PART B: RELIABLE UDP GO-BACK-N ARQ &amp; PACKET LOSS RECOVERY TIMELINE" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="60" y="200" width="800" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- Lifelines -->
+        <mxCell id="sender_box" value="Sender (Client / Server)&#xa;Window Size N=4, Timeout=0.5 s" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="120" y="240" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="receiver_box" value="Receiver (Server / Client)&#xa;Expected Sequence Number: next_seq" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="700" y="240" width="230" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="line_sender" value="" style="endArrow=none;dashed=1;html=1;strokeWidth=2;strokeColor=#16a34a;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="230" y="800" as="sourcePoint" />
+            <mxPoint x="230" y="290" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="line_receiver" value="" style="endArrow=none;dashed=1;html=1;strokeWidth=2;strokeColor=#2563eb;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="815" y="800" as="sourcePoint" />
+            <mxPoint x="815" y="290" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Message Transmissions -->
+        <!-- Packet 1 -->
+        <mxCell id="m_seq1" value="DATA [seq=1]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="230" y="320" as="sourcePoint" />
+            <mxPoint x="815" y="350" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_ack1" value="ACK [ack=1]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="815" y="360" as="sourcePoint" />
+            <mxPoint x="230" y="390" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Packet 2 -->
+        <mxCell id="m_seq2" value="DATA [seq=2]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="230" y="410" as="sourcePoint" />
+            <mxPoint x="815" y="440" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_ack2" value="ACK [ack=2]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="815" y="450" as="sourcePoint" />
+            <mxPoint x="230" y="480" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Packet 3 (Dropped) -->
+        <mxCell id="m_seq3_drop" value="DATA [seq=3] (LOST / DROPPED BY SIMULATOR)" style="html=1;verticalAlign=bottom;endArrow=none;strokeColor=#dc2626;fontFamily=Times New Roman;fontSize=11;fontStyle=1;strokeWidth=2;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="230" y="500" as="sourcePoint" />
+            <mxPoint x="550" y="525" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="drop_cross" value="X (Packet Lost)" style="text;html=1;strokeColor=none;fillColor=#fee2e2;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontFamily=Times New Roman;fontSize=11;fontStyle=1;fontColor=#dc2626;" vertex="1" parent="1">
+          <mxGeometry x="540" y="515" width="100" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- Packet 4 (Out of order) -->
+        <mxCell id="m_seq4" value="DATA [seq=4] (Out of order)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="230" y="540" as="sourcePoint" />
+            <mxPoint x="815" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_ack2_dup" value="ACK [ack=2] (Cumulative ACK: discards seq=4, repeats ack=2)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#d97706;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="815" y="580" as="sourcePoint" />
+            <mxPoint x="230" y="610" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Timeout Note -->
+        <mxCell id="timeout_note" value="Timer Expires (0.5 s)&#xa;Go-Back-N resends window from base (seq=3)" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#fef3c7;strokeColor=#d97706;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="620" width="140" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Retransmission -->
+        <mxCell id="m_seq3_retx" value="DATA [seq=3, flag=RETRANSMISSION]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#dc2626;strokeWidth=2;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="230" y="700" as="sourcePoint" />
+            <mxPoint x="815" y="730" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_ack3" value="ACK [ack=3]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="815" y="735" as="sourcePoint" />
+            <mxPoint x="230" y="760" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="m_seq4_retx" value="DATA [seq=4, flag=RETRANSMISSION]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#dc2626;strokeWidth=2;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="230" y="765" as="sourcePoint" />
+            <mxPoint x="815" y="795" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_ack4" value="ACK [ack=4]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="815" y="800" as="sourcePoint" />
+            <mxPoint x="230" y="825" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Caption -->
+        <mxCell id="caption3" value="Figure 3.3: Detailed Network Sub-Diagram (HLD-3): Packet Format and Go-Back-N Retransmission Protocol" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="220" y="860" width="700" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
