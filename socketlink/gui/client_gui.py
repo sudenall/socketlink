@@ -21,9 +21,31 @@ Required widgets (README section 7, İlayda's checklist):
 
 from __future__ import annotations
 
+import queue
 import tkinter as tk
+from datetime import datetime
+from tkinter import ttk
 
-from socketlink.common.events import Event, EventBus
+from socketlink.common.config import ClientConfig
+from socketlink.common.constants import (
+    APP_NAME,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_WINDOW_SIZE,
+    GUI_POLL_INTERVAL_MS,
+    MAX_SIMULATED_DELAY_MS,
+    MAX_SIMULATED_LOSS,
+    MAX_WINDOW_SIZE,
+    ClientErrorCode,
+    ConnectionState,
+    DisconnectReason,
+    ErrorCode,
+    FileFailReason,
+    TransportMode,
+)
+from socketlink.common.events import Event, EventBus, EventType
+from socketlink.common.exceptions import ValidationError
+from socketlink.gui import theme
 
 
 class ClientApp:
@@ -31,21 +53,502 @@ class ClientApp:
         self.root = root
         self.event_bus = event_bus or EventBus()
         self.events = self.event_bus.subscribe_queue()
+        self._poll_after_id: str | None = None
 
     def build_ui(self) -> None:
-        raise NotImplementedError("TODO(İlayda)")
+        """Build the connection form without enabling network operations."""
+        self.root.title(f"{APP_NAME} - Client")
+        self.root.geometry(theme.CLIENT_WINDOW_SIZE)
+        self.root.configure(bg=theme.COLOR_BG)
+
+        tk.Label(
+            self.root,
+            text=f"{APP_NAME} Client",
+            font=theme.FONT_TITLE,
+            bg=theme.COLOR_BG,
+            fg=theme.COLOR_TEXT,
+        ).pack(anchor="w", padx=theme.PAD, pady=theme.PAD)
+
+        self.connection_panel = tk.LabelFrame(
+            self.root,
+            text="Connection",
+            font=theme.FONT_BOLD,
+            bg=theme.COLOR_PANEL,
+            fg=theme.COLOR_TEXT,
+            padx=theme.PAD,
+            pady=theme.PAD,
+        )
+        self.connection_panel.pack(fill="x", padx=theme.PAD, pady=theme.PAD_SMALL)
+        self.connection_panel.columnconfigure(1, weight=1)
+
+        self.host_var = tk.StringVar(master=self.root, value=DEFAULT_HOST)
+        self.port_var = tk.StringVar(master=self.root, value=str(DEFAULT_PORT))
+        self.username_var = tk.StringVar(master=self.root)
+        self.mode_var = tk.StringVar(master=self.root, value=TransportMode.TCP.value)
+
+        for row, (label, variable) in enumerate((
+            ("Host", self.host_var),
+            ("Port", self.port_var),
+            ("Username", self.username_var),
+        )):
+            tk.Label(
+                self.connection_panel,
+                text=label,
+                font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL,
+                fg=theme.COLOR_TEXT,
+            ).grid(row=row, column=0, sticky="w", padx=theme.PAD_SMALL,
+                   pady=theme.PAD_SMALL)
+            tk.Entry(
+                self.connection_panel,
+                textvariable=variable,
+                font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL,
+                fg=theme.COLOR_TEXT,
+                insertbackground=theme.COLOR_TEXT,
+            ).grid(row=row, column=1, sticky="ew", padx=theme.PAD_SMALL,
+                   pady=theme.PAD_SMALL)
+
+        mode_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
+        mode_panel.grid(row=3, column=1, sticky="w", pady=theme.PAD_SMALL)
+        mode_style = ttk.Style(self.root)
+        mode_style.configure(
+            "SocketLink.TRadiobutton", font=theme.FONT_NORMAL,
+            background=theme.COLOR_PANEL, foreground=theme.COLOR_TEXT,
+        )
+        mode_style.map(
+            "SocketLink.TRadiobutton",
+            background=[("active", theme.COLOR_PANEL)],
+            foreground=[("active", theme.COLOR_TEXT)],
+        )
+        self.mode_buttons: dict[TransportMode, ttk.Radiobutton] = {}
+        for mode in TransportMode:
+            button = ttk.Radiobutton(
+                mode_panel,
+                text=mode.value.upper(),
+                variable=self.mode_var,
+                value=mode.value,
+            )
+            button.state(["!disabled"])
+            button.pack(side="left", padx=theme.PAD_SMALL)
+            self.mode_buttons[mode] = button
+
+        button_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
+        button_panel.grid(row=4, column=1, sticky="w", pady=theme.PAD_SMALL)
+        self.connect_button = tk.Button(
+            button_panel, text="Connect", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            disabledforeground=theme.COLOR_MUTED,
+        )
+        self.connect_button.pack(side="left", padx=theme.PAD_SMALL)
+        self.disconnect_button = tk.Button(
+            button_panel, text="Disconnect", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            disabledforeground=theme.COLOR_MUTED,
+        )
+        self.disconnect_button.pack(side="left", padx=theme.PAD_SMALL)
+
+        self.status_label = tk.Label(
+            self.connection_panel,
+            text="Disconnected",
+            font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL,
+            fg=theme.COLOR_DISCONNECTED,
+        )
+        self.status_label.grid(row=5, column=0, columnspan=2, sticky="w",
+                               padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self.notice_label = tk.Label(
+            self.root, text="", anchor="w", font=theme.FONT_NORMAL,
+            bg=theme.COLOR_BG, fg=theme.COLOR_TEXT,
+        )
+        self.notice_label.pack(fill="x", padx=theme.PAD)
+        self.notice_label.bind(
+            "<Configure>", lambda event: self.notice_label.configure(wraplength=event.width)
+        )
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=theme.PAD, pady=theme.PAD_SMALL)
+        self.chat_panel = tk.LabelFrame(
+            self.notebook, text="Chat", font=theme.FONT_BOLD,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            padx=theme.PAD, pady=theme.PAD,
+        )
+        self.notebook.add(self.chat_panel, text="Chat")
+        self.chat_panel.rowconfigure(0, weight=1)
+        self.chat_panel.columnconfigure(0, weight=1)
+
+        history_panel = tk.Frame(self.chat_panel, bg=theme.COLOR_PANEL)
+        history_panel.grid(row=0, column=0, sticky="nsew", padx=theme.PAD_SMALL)
+        history_panel.rowconfigure(0, weight=1)
+        history_panel.columnconfigure(0, weight=1)
+        self.message_history = tk.Text(
+            history_panel, height=5, width=40, wrap="word", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        )
+        self.message_history.grid(row=0, column=0, sticky="nsew")
+        self.message_scrollbar = tk.Scrollbar(
+            history_panel, orient="vertical", command=self.message_history.yview,
+        )
+        self.message_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.message_history.configure(yscrollcommand=self.message_scrollbar.set)
+
+        users_panel = tk.LabelFrame(
+            self.chat_panel, text="Recipients / Online users", font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        )
+        users_panel.grid(row=0, column=1, sticky="nsew", padx=theme.PAD_SMALL)
+        self.user_list = tk.Listbox(
+            users_panel, height=5, width=24, exportselection=False,
+            selectmode=tk.SINGLE, font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            selectbackground=theme.COLOR_ACCENT, selectforeground=theme.COLOR_PANEL,
+        )
+        self.user_list.pack(side="left", fill="both", expand=True)
+        user_scrollbar = tk.Scrollbar(
+            users_panel, orient="vertical", command=self.user_list.yview,
+        )
+        user_scrollbar.pack(side="right", fill="y")
+        self.user_list.configure(yscrollcommand=user_scrollbar.set)
+        self.user_list.insert(tk.END, "Everyone")
+        self.user_list.selection_set(0)
+
+        self.message_var = tk.StringVar(master=self.root)
+        self.message_entry = tk.Entry(
+            self.chat_panel, textvariable=self.message_var, font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT, insertbackground=theme.COLOR_TEXT,
+        )
+        self.message_entry.grid(row=1, column=0, sticky="ew",
+                                padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self.send_button = tk.Button(
+            self.chat_panel, text="Send", state=tk.DISABLED,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            disabledforeground=theme.COLOR_MUTED,
+        )
+        self.send_button.grid(row=1, column=1, sticky="e",
+                              padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self._build_udp_panel()
+        self._build_monitor_panels()
+        self._poll_events()
+
+    def _build_monitor_panels(self) -> None:
+        """Build event-driven statistics and a bounded, read-only live log."""
+        self.stats_panel = tk.Frame(self.notebook, bg=theme.COLOR_PANEL)
+        self.notebook.add(self.stats_panel, text="Statistics")
+        self.stat_labels: dict[str, tk.Label] = {}
+        rows = (
+            ("packets_sent", "Packets sent"), ("packets_received", "Packets received"),
+            ("bytes_sent", "Bytes sent"), ("bytes_received", "Bytes received"),
+            ("retransmissions", "Retransmissions"),
+            ("packets_dropped_simulated", "Simulated drops"),
+            ("duplicates_received", "Duplicates received"),
+            ("checksum_errors", "Checksum errors"), ("avg_rtt_ms", "Average RTT (ms)"),
+        )
+        for index, (key, title) in enumerate(rows):
+            row, group = divmod(index, 3)
+            column = group * 2
+            tk.Label(
+                self.stats_panel, text=title, font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            ).grid(row=row, column=column, sticky="w", padx=theme.PAD, pady=theme.PAD_SMALL)
+            label = tk.Label(
+                self.stats_panel, text="—", font=theme.FONT_BOLD,
+                bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            )
+            label.grid(row=row, column=column + 1, sticky="e", padx=theme.PAD)
+            self.stat_labels[key] = label
+            self.stats_panel.columnconfigure(column, weight=1)
+
+        self.log_panel = tk.Frame(self.notebook, bg=theme.COLOR_PANEL)
+        self.notebook.add(self.log_panel, text="Live log")
+        self.log_panel.columnconfigure(0, weight=1)
+        self.log_panel.rowconfigure(0, weight=1)
+        self.log_text = tk.Text(
+            self.log_panel, height=5, width=40, wrap="word", state=tk.DISABLED,
+            font=theme.FONT_MONO, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        )
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = tk.Scrollbar(self.log_panel, command=self.log_text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        colors = {
+            "INFO": theme.COLOR_TEXT, "DEBUG": theme.COLOR_MUTED,
+            "JOINED": theme.COLOR_CONNECTED, "LEFT": theme.COLOR_CONNECTING,
+            "WARNING": theme.COLOR_CONNECTING, "ERROR": theme.COLOR_DISCONNECTED,
+            "CRITICAL": theme.COLOR_DISCONNECTED,
+            "SENT": theme.COLOR_PKT_SENT, "RECEIVED": theme.COLOR_PKT_RECEIVED,
+            "DROPPED": theme.COLOR_PKT_DROPPED,
+            "RETRANSMITTED": theme.COLOR_PKT_RETRANSMITTED,
+        }
+        for tag, color in colors.items():
+            self.log_text.tag_configure(tag, foreground=color)
+
+    def _append_log(self, level: str, message: str, timestamp: float) -> None:
+        """Keep the latest 500 physical lines, including multiline event messages."""
+        level = str(level).upper()
+        tag = level if level in self.log_text.tag_names() else "INFO"
+        clock = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+        self.log_text.configure(state=tk.NORMAL)
+        try:
+            for line in str(message).splitlines() or [""]:
+                self.log_text.insert(tk.END, f"{clock} [{tag}] {line}\n", tag)
+            lines = int(self.log_text.index("end-1c").split(".")[0]) - 1
+            if lines > 500:
+                self.log_text.delete("1.0", f"{lines - 500 + 1}.0")
+            self.log_text.see(tk.END)
+        finally:
+            self.log_text.configure(state=tk.DISABLED)
+
+    def _show_notice(self, message: str, level: str, event: Event) -> None:
+        """Keep user-facing diagnostics visible even when the log tab is hidden."""
+        color = theme.COLOR_DISCONNECTED if level == "ERROR" else theme.COLOR_CONNECTING
+        self.notice_label.configure(text=message, fg=color)
+        self._append_log(level, message, event.timestamp)
+
+    @staticmethod
+    def _disconnect_message(reason: object) -> str:
+        """Translate existing enum values without inventing new reason codes."""
+        messages = {
+            DisconnectReason.USER: "Bağlantı kapatıldı",
+            DisconnectReason.SERVER_SHUTDOWN: "Sunucu kapandı",
+            DisconnectReason.KICKED_BY_ADMIN: "Yönetici tarafından atıldınız",
+            DisconnectReason.TIMEOUT: "Bağlantı zaman aşımına uğradı",
+            DisconnectReason.CONNECTION_LOST: "Bağlantı koptu, yeniden deneniyor",
+            DisconnectReason.REJECTED: "Sunucu bağlantıyı reddetti",
+            DisconnectReason.CONNECT_FAILED: "Sunucuya bağlanılamadı",
+            DisconnectReason.INTERNAL_ERROR: "Beklenmeyen hata",
+        }
+        return messages.get(getattr(reason, "value", reason), "Bağlantı sonlandı")
+
+    @staticmethod
+    def _error_message(code: object) -> str:
+        """Resolve client codes first, then protocol codes; hide unknown details."""
+        value = getattr(code, "value", code)
+        try:
+            known = ClientErrorCode(value)
+        except (ValueError, TypeError):
+            try:
+                known = ErrorCode(value)
+            except (ValueError, TypeError):
+                return "Beklenmeyen bir hata oluştu"
+        messages = {
+            ClientErrorCode.CONNECTION_REFUSED: "Sunucu bağlantıyı kabul etmiyor",
+            ClientErrorCode.CONNECT_TIMEOUT: "Sunucuya bağlantı zaman aşımına uğradı",
+            ClientErrorCode.CONNECTION_LOST: "Sunucuyla bağlantı koptu",
+            ClientErrorCode.PROTOCOL_ERROR: "Sunucudan geçersiz veri alındı",
+            ClientErrorCode.INVALID_STATE: "Bu işlem mevcut bağlantı durumunda kullanılamaz",
+            ErrorCode.BAD_CHECKSUM: "Veri bütünlüğü kontrolü başarısız",
+            ErrorCode.MALFORMED_PACKET: "Geçersiz paket alındı",
+            ErrorCode.VERSION_MISMATCH: "Protokol sürümleri uyumlu değil",
+            ErrorCode.NOT_AUTHENTICATED: "Önce sunucuya bağlanmalısınız",
+            ErrorCode.INVALID_USERNAME: "Kullanıcı adı geçersiz",
+            ErrorCode.USERNAME_TAKEN: "Bu kullanıcı adı zaten kullanılıyor",
+            ErrorCode.UNKNOWN_USER: "Alıcı kullanıcı bulunamadı",
+            ErrorCode.PAYLOAD_TOO_LARGE: "Gönderilecek veri boyut sınırını aşıyor",
+            ErrorCode.SERVER_FULL: "Sunucu dolu",
+            ErrorCode.FILE_REJECTED: "Dosya reddedildi",
+            ErrorCode.INTERNAL_ERROR: "Sunucuda beklenmeyen hata oluştu",
+        }
+        return messages[known]
+
+    @staticmethod
+    def _file_failure_message(reason: object) -> str:
+        """Describe file failures without starting a transfer or adding file controls."""
+        messages = {
+            FileFailReason.INVALID_FILE: "Dosya geçersiz",
+            FileFailReason.READ_ERROR: "Dosya okunamadı",
+            FileFailReason.SEND_ERROR: "Dosya gönderilemedi",
+            FileFailReason.CANCELLED: "Dosya aktarımı iptal edildi",
+            FileFailReason.FILE_TOO_LARGE: "Dosya boyut sınırını aşıyor",
+            FileFailReason.BAD_PACKET: "Dosya aktarım paketi geçersiz",
+            FileFailReason.BAD_CHUNK: "Dosya parçası geçersiz",
+            FileFailReason.TRANSFER_ID_CONFLICT: "Dosya aktarım kimliği çakıştı",
+            FileFailReason.MISSING_CHUNKS: "Dosya parçaları eksik",
+            FileFailReason.CHECKSUM_MISMATCH: "Dosya bütünlüğü doğrulanamadı",
+            FileFailReason.WRITE_ERROR: "Dosya kaydedilemedi",
+            FileFailReason.CONNECTION_LOST: "Dosya aktarımı sırasında bağlantı koptu",
+        }
+        return messages.get(getattr(reason, "value", reason), "Dosya aktarımı başarısız")
+
+    def _build_udp_panel(self) -> None:
+        """Build local simulation inputs; no transport is called here."""
+        defaults = ClientConfig()
+        self.loss_percent_var = tk.IntVar(master=self.root, value=int(defaults.loss_rate * 100))
+        self.delay_ms_var = tk.IntVar(master=self.root, value=defaults.delay_ms)
+        self.window_size_var = tk.StringVar(master=self.root, value=str(DEFAULT_WINDOW_SIZE))
+        self.udp_panel = tk.LabelFrame(
+            self.root, text="UDP Simulation", font=theme.FONT_BOLD,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            padx=theme.PAD, pady=theme.PAD_SMALL,
+        )
+        self.udp_panel.pack(fill="x", before=self.notebook,
+                            padx=theme.PAD, pady=theme.PAD_SMALL)
+        self.udp_controls: list[tk.Scale | tk.Spinbox] = []
+        for column, (label, variable, maximum) in enumerate((
+            ("Packet Loss (%)", self.loss_percent_var, int(MAX_SIMULATED_LOSS * 100)),
+            ("Delay (ms)", self.delay_ms_var, MAX_SIMULATED_DELAY_MS),
+        )):
+            self.udp_panel.columnconfigure(column, weight=1)
+            tk.Label(
+                self.udp_panel, text=label, font=theme.FONT_NORMAL,
+                bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            ).grid(row=0, column=column, sticky="w", padx=theme.PAD_SMALL)
+            control = tk.Scale(
+                self.udp_panel, from_=0, to=maximum, resolution=1,
+                variable=variable, orient=tk.HORIZONTAL, showvalue=True,
+                font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+                troughcolor=theme.COLOR_BG, activebackground=theme.COLOR_ACCENT,
+                highlightthickness=0,
+            )
+            control.grid(row=1, column=column, sticky="ew", padx=theme.PAD_SMALL)
+            self.udp_controls.append(control)
+        tk.Label(
+            self.udp_panel, text="Window Size (packets)", font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        ).grid(row=0, column=2, sticky="w", padx=theme.PAD_SMALL)
+        self.window_size_spinbox = tk.Spinbox(
+            self.udp_panel, from_=1, to=MAX_WINDOW_SIZE, increment=1,
+            textvariable=self.window_size_var, width=6, font=theme.FONT_NORMAL,
+            bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT, insertbackground=theme.COLOR_TEXT,
+            disabledbackground=theme.COLOR_BG, disabledforeground=theme.COLOR_MUTED,
+        )
+        self.window_size_spinbox.grid(row=1, column=2, sticky="w", padx=theme.PAD_SMALL)
+        self.udp_controls.append(self.window_size_spinbox)
+        self.mode_var.trace_add("write", self._update_udp_controls)
+        self._update_udp_controls()
+
+    def _update_udp_controls(self, *_args: str) -> None:
+        """Enable simulation inputs only while UDP is selected."""
+        state = tk.NORMAL if self.mode_var.get() == TransportMode.UDP.value else tk.DISABLED
+        for control in self.udp_controls:
+            control.configure(state=state)
+
+    def _build_client_config(self) -> ClientConfig:
+        """Read the form without connecting or calling ClientConfig.validate().
+
+        Convert numeric inputs and check control bounds; full configuration
+        validation belongs to ClientConfig.
+        """
+        try:
+            port = int(self.port_var.get())
+        except ValueError as exc:
+            raise ValidationError("Port must be a whole number.") from exc
+        try:
+            loss_percent = self.loss_percent_var.get()
+            delay_ms = self.delay_ms_var.get()
+            window_size = int(self.window_size_var.get())
+        except (ValueError, tk.TclError) as exc:
+            raise ValidationError("UDP settings must be whole numbers.") from exc
+        if not 0 <= loss_percent <= MAX_SIMULATED_LOSS * 100:
+            raise ValidationError(
+                f"Packet loss must be between 0 and {MAX_SIMULATED_LOSS * 100:g}%."
+            )
+        if not 0 <= delay_ms <= MAX_SIMULATED_DELAY_MS:
+            raise ValidationError(f"Delay must be between 0 and {MAX_SIMULATED_DELAY_MS} ms.")
+        if not 1 <= window_size <= MAX_WINDOW_SIZE:
+            raise ValidationError(f"Window size must be between 1 and {MAX_WINDOW_SIZE}.")
+        return ClientConfig(
+            host=self.host_var.get().strip(),
+            port=port,
+            username=self.username_var.get().strip(),
+            mode=TransportMode(self.mode_var.get()),
+            loss_rate=loss_percent / 100,
+            delay_ms=delay_ms,
+            window_size=window_size,
+        )
 
     def _poll_events(self) -> None:
         """Drain self.events without blocking (get_nowait loop), call _handle_event,
         then reschedule with root.after(GUI_POLL_INTERVAL_MS, self._poll_events)."""
-        raise NotImplementedError("TODO(İlayda)")
+        try:
+            while True:
+                event = self.events.get_nowait()
+                self._handle_event(event)
+        except queue.Empty:
+            pass
+        self._poll_after_id = self.root.after(GUI_POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, event: Event) -> None:
-        raise NotImplementedError("TODO(İlayda)")
+        """Render queued chat, user-list and connection events on the Tk thread."""
+        data = event.data
+        if event.type == EventType.STATS_UPDATED:
+            for key, label in self.stat_labels.items():
+                value = data["stats"].get(key)
+                label.configure(text=(f"{value:.1f}" if key == "avg_rtt_ms"
+                                      and isinstance(value, (int, float))
+                                      else str(value) if value is not None else "—"))
+            return
+        if event.type == EventType.LOG:
+            self._append_log(data["level"], data["message"], event.timestamp)
+            return
+        packet_tags = {
+            EventType.PACKET_SENT: "SENT", EventType.PACKET_RECEIVED: "RECEIVED",
+            EventType.PACKET_DROPPED: "DROPPED",
+            EventType.PACKET_RETRANSMITTED: "RETRANSMITTED",
+        }
+        if event.type in packet_tags:
+            description = str(data["summary"])
+            if event.type == EventType.PACKET_RETRANSMITTED:
+                description += f" (attempt {data['attempt']})"
+            self._append_log(packet_tags[event.type], description, event.timestamp)
+            return
+        if event.type == EventType.PACKET_CORRUPTED:
+            description = {"checksum": "Paket bütünlüğü kontrolü başarısız",
+                           "malformed": "Bozuk paket alındı"}.get(
+                               data["reason"], "Geçersiz paket alındı")
+            self._append_log("ERROR", description, event.timestamp)
+            return
+        if event.type == EventType.ERROR:
+            self._show_notice(self._error_message(data["code"]), "ERROR", event)
+            return
+        if event.type == EventType.FILE_FAILED:
+            self._show_notice(self._file_failure_message(data["reason"]), "ERROR", event)
+            return
+        if event.type == EventType.MESSAGE_RECEIVED:
+            timestamp = datetime.fromtimestamp(event.data["timestamp"]).strftime("%H:%M:%S")
+            recipient = event.data["to"]
+            audience = "Everyone" if recipient is None else recipient
+            line = f"[{timestamp}] {event.data['from']} -> {audience}: {event.data['text']}\n"
+            self.message_history.configure(state=tk.NORMAL)
+            try:
+                self.message_history.insert(tk.END, line)
+                self.message_history.see(tk.END)
+            finally:
+                self.message_history.configure(state=tk.DISABLED)
+            return
+        if event.type == EventType.USER_LIST_UPDATED:
+            selection = self.user_list.curselection()
+            selected = self.user_list.get(selection[0]) if selection else "Everyone"
+            users = ["Everyone", *event.data["users"]]
+            self.user_list.delete(0, tk.END)
+            self.user_list.insert(tk.END, *users)
+            self.user_list.selection_set(users.index(selected) if selected in users else 0)
+            return
+        if event.type == EventType.STATE_CHANGED:
+            state = ConnectionState(event.data["new"])
+        elif event.type == EventType.CONNECTED:
+            state = ConnectionState.CONNECTED
+            self.notice_label.configure(text="")
+        elif event.type == EventType.DISCONNECTED:
+            state = ConnectionState.DISCONNECTED
+            self._show_notice(self._disconnect_message(data["reason"]), "WARNING", event)
+        else:
+            # Other event types will be handled when their panels are implemented.
+            return
+
+        colors = {
+            ConnectionState.DISCONNECTED: theme.COLOR_DISCONNECTED,
+            ConnectionState.CONNECTING: theme.COLOR_CONNECTING,
+            ConnectionState.CONNECTED: theme.COLOR_CONNECTED,
+            ConnectionState.RECONNECTING: theme.COLOR_CONNECTING,
+            ConnectionState.DISCONNECTING: theme.COLOR_CONNECTING,
+        }
+        self.status_label.configure(text=state.value.capitalize(), fg=colors[state])
 
     def on_close(self) -> None:
         """Disconnect cleanly, then root.destroy()."""
-        raise NotImplementedError("TODO(İlayda)")
+        if self._poll_after_id is not None:
+            self.root.after_cancel(self._poll_after_id)
+            self._poll_after_id = None
+        self.root.destroy()
 
 
 def main() -> None:
