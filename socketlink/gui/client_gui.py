@@ -21,8 +21,11 @@ Required widgets (README section 7, İlayda's checklist):
 
 from __future__ import annotations
 
+import argparse
 import queue
+import time
 import tkinter as tk
+from collections.abc import Sequence
 from datetime import datetime
 from tkinter import ttk
 
@@ -36,6 +39,7 @@ from socketlink.common.constants import (
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,
     MAX_WINDOW_SIZE,
+    STATS_UPDATE_INTERVAL,
     ClientErrorCode,
     ConnectionState,
     DisconnectReason,
@@ -45,6 +49,7 @@ from socketlink.common.constants import (
 )
 from socketlink.common.events import Event, EventBus, EventType
 from socketlink.common.exceptions import ValidationError
+from socketlink.common.stats import TransportStats
 from socketlink.gui import theme
 
 
@@ -54,6 +59,7 @@ class ClientApp:
         self.event_bus = event_bus or EventBus()
         self.events = self.event_bus.subscribe_queue()
         self._poll_after_id: str | None = None
+        self.demo: DemoClient | None = None
 
     def build_ui(self) -> None:
         """Build the connection form without enabling network operations."""
@@ -545,15 +551,107 @@ class ClientApp:
 
     def on_close(self) -> None:
         """Disconnect cleanly, then root.destroy()."""
+        if self.demo is not None:
+            self.demo.stop()
         if self._poll_after_id is not None:
             self.root.after_cancel(self._poll_after_id)
             self._poll_after_id = None
         self.root.destroy()
 
 
-def main() -> None:
+class DemoClient:
+    """Publish invented traffic through EventBus; never open a socket.
+
+    Short ticks run on the Tk thread and only publish events. ClientApp renders
+    them through its existing queue. stop() cancels the pending tick on close.
+    """
+
+    def __init__(self, root: tk.Tk, event_bus: EventBus, config: ClientConfig) -> None:
+        self.root = root
+        self.event_bus = event_bus
+        self.config = config
+        self._after_id: str | None = None
+        self._running = False
+        self._sequence = 0
+        self._stats = TransportStats()
+
+    def start(self) -> None:
+        """Start one clearly identified, server-free demonstration session."""
+        if self._running:
+            return
+        self._running = True
+        self._publish(EventType.STATE_CHANGED, {
+            "old": ConnectionState.DISCONNECTED.value,
+            "new": ConnectionState.CONNECTING.value,
+        })
+        self._publish(EventType.STATE_CHANGED, {
+            "old": ConnectionState.CONNECTING.value,
+            "new": ConnectionState.CONNECTED.value,
+        })
+        self._publish(EventType.CONNECTED, {
+            "host": self.config.host, "port": self.config.port,
+            "mode": self.config.mode.value, "username": self.config.username, "client_id": 1,
+        })
+        self._publish(EventType.USER_LIST_UPDATED, {
+            "users": ["alice", "bob", self.config.username],
+        })
+        self._publish(EventType.LOG, {
+            "level": "INFO", "message": "DEMO: invented traffic; no server connection.",
+        })
+        self._tick()
+
+    def _tick(self) -> None:
+        """Emit one small batch with the real event payload keys."""
+        if not self._running:
+            return
+        self._sequence += 1
+        sender = "alice" if self._sequence % 2 else "bob"
+        text = f"Demo message {self._sequence} from {sender}"
+        summary = f"DEMO CHAT seq={self._sequence}"
+        self._publish(EventType.PACKET_SENT, {"summary": summary})
+        if self.config.mode == TransportMode.UDP and self._sequence % 3 == 0:
+            self._publish(EventType.PACKET_DROPPED, {"summary": summary})
+            self._publish(EventType.PACKET_RETRANSMITTED, {"summary": summary, "attempt": 1})
+            self._stats.add(packets_dropped_simulated=1, retransmissions=1)
+        self._publish(EventType.PACKET_RECEIVED, {"summary": summary})
+        self._publish(EventType.MESSAGE_RECEIVED, {
+            "from": sender, "to": None, "text": text, "timestamp": time.time(),
+        })
+        size = len(text.encode("utf-8"))
+        self._stats.add(packets_sent=1, packets_received=1, bytes_sent=size, bytes_received=size)
+        self._publish(EventType.STATS_UPDATED, {"stats": self._stats.snapshot()})
+        self._publish(EventType.LOG, {
+            "level": "DEBUG", "message": f"DEMO: delivered message {self._sequence}",
+        })
+        self._after_id = self.root.after(int(STATS_UPDATE_INTERVAL * 1000), self._tick)
+
+    def stop(self) -> None:
+        """Cancel future demo events before the Tk window is destroyed."""
+        if not self._running:
+            return
+        self._running = False
+        if self._after_id is not None:
+            self.root.after_cancel(self._after_id)
+            self._after_id = None
+        self._publish(EventType.DISCONNECTED, {"reason": DisconnectReason.USER.value})
+
+    def _publish(self, event_type: EventType, data: dict[str, object]) -> None:
+        self.event_bus.publish(Event(event_type, data, source="client"))
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} client GUI")
+    parser.add_argument("--demo", action="store_true",
+                        help="show invented client traffic without connecting to a server")
+    args = parser.parse_args(argv)
     root = tk.Tk()
     app = ClientApp(root)
     app.build_ui()
+    if args.demo:
+        root.title(f"{APP_NAME} - Client (DEMO)")
+        app.username_var.set("demo_client")
+        app.mode_var.set(TransportMode.UDP.value)
+        app.demo = DemoClient(root, app.event_bus, app._build_client_config())
+        app.demo.start()
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
