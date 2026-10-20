@@ -16,7 +16,7 @@ import pytest
 tk = pytest.importorskip("tkinter")
 
 from socketlink.common.config import ServerConfig  # noqa: E402
-from socketlink.common.constants import TransportMode  # noqa: E402
+from socketlink.common.constants import DisconnectReason, TransportMode  # noqa: E402
 from socketlink.common.events import Event, EventBus, EventType  # noqa: E402
 from socketlink.gui import server_gui  # noqa: E402
 from socketlink.gui.server_gui import DemoServer, ServerApp  # noqa: E402
@@ -68,7 +68,8 @@ def test_demo_server_kick_removes_client() -> None:
     server.kick(name)
     server.kick(name)   # unknown now: nothing happens
     assert name not in [c.username for c in server.get_clients()]
-    assert [e.data for e in _drain(q)] == [{"username": name, "reason": "kicked_by_admin"}]
+    assert [e.data for e in _drain(q)] == [
+        {"username": name, "reason": DisconnectReason.KICKED_BY_ADMIN.value}]
 
 
 # ---- window ----------------------------------------------------------------------
@@ -164,12 +165,16 @@ def test_kick_selected_client(root: tk.Tk, dialogs: list[str]) -> None:
     _pump(app)
     assert dialogs == ["ask"]
     assert name not in app.client_table.get_children()
-    assert f"{name} left (kicked_by_admin)" in _log_text(app)
+    assert f"{name} left ({DisconnectReason.KICKED_BY_ADMIN.value})" in _log_text(app)
     app.on_close()
 
 
-def test_real_server_not_implemented_shows_info(root: tk.Tk, dialogs: list[str]) -> None:
-    app = _app(root, server_class=ChatServer)
+def test_server_not_ready_shows_info(root: tk.Tk, dialogs: list[str]) -> None:
+    class NotReadyServer(DemoServer):
+        def start(self) -> None:
+            raise NotImplementedError("not ready")
+
+    app = _app(root, server_class=NotReadyServer)
     app._on_start()
     assert dialogs == ["info"]
     assert app.server is None

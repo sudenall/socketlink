@@ -39,6 +39,8 @@ from socketlink.common.constants import (
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,
     STATS_UPDATE_INTERVAL,
+    ByeReason,
+    DisconnectReason,
     TransportMode,
 )
 from socketlink.common.events import Event, EventBus, EventType
@@ -483,7 +485,7 @@ class DemoServer(ChatServer):
             self._thread.join(timeout=STATS_UPDATE_INTERVAL * 2)
         with self._clients_lock:
             self._fake_clients.clear()
-        self._publish(EventType.SERVER_STOPPED, {"reason": "user"})
+        self._publish(EventType.SERVER_STOPPED, {"reason": DisconnectReason.USER.value})
 
     @property
     def is_running(self) -> bool:
@@ -493,11 +495,12 @@ class DemoServer(ChatServer):
         with self._clients_lock:
             return list(self._fake_clients.values())
 
-    def kick(self, username: str, reason: str = "kicked_by_admin") -> None:
+    def kick(self, username: str, reason: str = ByeReason.KICKED_BY_ADMIN.value) -> None:
         with self._clients_lock:
             removed = self._fake_clients.pop(username, None)
         if removed is not None:
-            self._publish(EventType.CLIENT_LEFT, {"username": username, "reason": reason})
+            self._publish(EventType.CLIENT_LEFT, {
+                "username": username, "reason": DisconnectReason.from_bye(reason).value})
 
     def get_stats(self) -> dict[str, int | float]:
         return self._stats.snapshot()
@@ -522,7 +525,8 @@ class DemoServer(ChatServer):
             self._join(self._random.choice(free), now)
         elif online and roll > 0.92:
             name = self._random.choice(online)
-            reason = self._random.choice(("user", "timeout", "connection_lost"))
+            reason = self._random.choice((DisconnectReason.USER, DisconnectReason.TIMEOUT,
+                                          DisconnectReason.CONNECTION_LOST)).value
             with self._clients_lock:
                 self._fake_clients.pop(name, None)
             self._publish(EventType.CLIENT_LEFT, {"username": name, "reason": reason})
