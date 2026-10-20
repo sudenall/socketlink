@@ -340,6 +340,21 @@ def test_all_packets_arrive_in_order_once_despite_loss(
     check_exactly_once_in_order(received, pair, 200, loss_rate)
 
 
+@pytest.mark.timeout(SLOW_TEST_TIMEOUT)
+@pytest.mark.parametrize("loss_rate", [
+    0.0,
+    pytest.param(0.1, marks=pytest.mark.slow),
+    pytest.param(0.2, marks=pytest.mark.slow),
+    pytest.param(0.3, marks=pytest.mark.slow),
+])
+def test_500_packets_arrive_in_order_once_despite_loss(
+    listener: ReliableUdpListener, loss_rate: float
+) -> None:
+    """T-11 as in README section 13.2: 500 packets, 0 / 10 / 20 / 30 % loss, default window."""
+    received, pair = send_through_lossy_link(listener, 500, loss_rate, DEFAULT_WINDOW_SIZE)
+    check_exactly_once_in_order(received, pair, 500, loss_rate)
+
+
 # --------------------------------------------------------------------------- #
 # T-12: Stop-and-Wait vs Go-Back-N
 # --------------------------------------------------------------------------- #
@@ -363,6 +378,35 @@ def test_window_four_is_faster_than_stop_and_wait_with_delay(
         client.close()
         server_side.close()
     assert durations[4] < durations[1] / 2
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(SLOW_TEST_TIMEOUT)
+def test_larger_window_is_faster_but_retransmits_more_under_loss(
+    listener: ReliableUdpListener,
+) -> None:
+    """T-12: 100 packets at 10 % loss (both directions) with window 1, 4 and 8.
+
+    Go-Back-N resends the whole window after a timeout, so a bigger window finishes sooner
+    but sends more retransmissions (D-07). Measured: window 1 needs about twice the time of
+    window 4 or 8, and retransmissions grow with the window on every seed that was tried.
+    """
+    count = 100
+    durations: dict[int, float] = {}
+    retransmissions: dict[int, int] = {}
+    for window_size in (1, 4, 8):
+        start = time.monotonic()
+        received, (client, server_side) = send_through_lossy_link(
+            listener, count, 0.1, window_size
+        )
+        durations[window_size] = time.monotonic() - start
+        retransmissions[window_size] = client.stats.retransmissions
+        client.close()
+        server_side.close()
+        assert received == [f"message {i}" for i in range(count)]
+    assert durations[4] < durations[1] * 0.8
+    assert durations[8] < durations[1] * 0.8
+    assert retransmissions[1] < retransmissions[4] < retransmissions[8]
 
 
 def test_send_blocks_while_the_window_is_full(pair) -> None:
