@@ -17,7 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from socketlink.common.constants import FILE_CHUNK_SIZE, MAX_FILE_SIZE, MessageType
+from socketlink.common.constants import (
+    FILE_CHUNK_SIZE,
+    MAX_FILE_SIZE,
+    FileFailReason,
+    MessageType,
+)
 from socketlink.common.events import Event, EventBus, EventType
 from socketlink.common.exceptions import ConnectionClosedError, ValidationError
 from socketlink.common.protocol import (
@@ -222,7 +227,7 @@ def test_send_without_recipient_sends_nothing_and_fails(
     FileSender(str(_make_file(tmp_path, "a.txt", b"x")), 1, sent.append, bus, to=to).send()
     assert sent == []
     failed = [e for e in _drain(events) if e.type == EventType.FILE_FAILED]
-    assert [e.data["reason"] for e in failed] == ["invalid_file"]
+    assert [e.data["reason"] for e in failed] == [FileFailReason.INVALID_FILE.value]
 
 
 def test_send_error_becomes_file_failed_and_does_not_raise(
@@ -233,7 +238,7 @@ def test_send_error_becomes_file_failed_and_does_not_raise(
     path = _make_file(tmp_path, "a.txt", b"x" * 5000)
     FileSender(str(path), 1, broken_send, bus, to=RECEIVER).send()
     failed = _of(_drain(events), EventType.FILE_FAILED, "upload")
-    assert [e.data["reason"] for e in failed] == ["send_error"]
+    assert [e.data["reason"] for e in failed] == [FileFailReason.SEND_ERROR.value]
 
 
 def test_cancel_mid_transfer_fails_both_sides_without_saving(
@@ -250,9 +255,9 @@ def test_cancel_mid_transfer_fails_both_sides_without_saving(
     assert len([p for p in sent if p.type == MessageType.FILE_CHUNK]) == 2
     got = _drain(events)
     assert [e.data["reason"] for e in _of(got, EventType.FILE_FAILED, "upload")] == [
-        "cancelled"]
+        FileFailReason.CANCELLED.value]
     assert [e.data["reason"] for e in _of(got, EventType.FILE_FAILED, "download")] == [
-        "missing_chunks"]
+        FileFailReason.MISSING_CHUNKS.value]
     assert list(receiver.target_dir.iterdir()) == []
 
 
@@ -272,7 +277,7 @@ def test_missing_last_chunk_fails(
 
     _transfer(_make_file(tmp_path, "a.bin", os.urandom(3 * FILE_CHUNK_SIZE)), receiver, bus,
               drop=drop_last)
-    _assert_failed(events, receiver, "missing_chunks")
+    _assert_failed(events, receiver, FileFailReason.MISSING_CHUNKS.value)
 
 
 def test_missing_middle_chunk_fails(
@@ -283,7 +288,7 @@ def test_missing_middle_chunk_fails(
 
     _transfer(_make_file(tmp_path, "a.bin", os.urandom(3 * FILE_CHUNK_SIZE)), receiver, bus,
               drop=drop_second)
-    _assert_failed(events, receiver, "bad_chunk")
+    _assert_failed(events, receiver, FileFailReason.BAD_CHUNK.value)
 
 
 def test_bad_crc_fails(events: queue.Queue[Event], receiver: FileReceiver) -> None:
@@ -291,7 +296,7 @@ def test_bad_crc_fails(events: queue.Queue[Event], receiver: FileReceiver) -> No
     receiver.handle_packet(_start(1, data, checksum=zlib.crc32(data) ^ 1))
     receiver.handle_packet(make_file_chunk(1, 0, data))
     receiver.handle_packet(make_file_end(1))
-    _assert_failed(events, receiver, "checksum_mismatch")
+    _assert_failed(events, receiver, FileFailReason.CHECKSUM_MISMATCH.value)
 
 
 def test_corrupted_chunk_data_fails_crc(
@@ -300,19 +305,19 @@ def test_corrupted_chunk_data_fails_crc(
     receiver.handle_packet(_start(1, data))
     receiver.handle_packet(make_file_chunk(1, 0, b"SOME DATA"))
     receiver.handle_packet(make_file_end(1))
-    _assert_failed(events, receiver, "checksum_mismatch")
+    _assert_failed(events, receiver, FileFailReason.CHECKSUM_MISMATCH.value)
 
 
 def test_too_large_offer_is_refused(events: queue.Queue[Event], receiver: FileReceiver) -> None:
     size = MAX_FILE_SIZE + 1
     receiver.handle_packet(make_file_start(1, "huge.bin", size, -(-size // FILE_CHUNK_SIZE),
                                            0, to=RECEIVER, sender=SENDER))
-    _assert_failed(events, receiver, "file_too_large")
+    _assert_failed(events, receiver, FileFailReason.FILE_TOO_LARGE.value)
 
 
 def test_wrong_chunk_count_is_refused(events: queue.Queue[Event], receiver: FileReceiver) -> None:
     receiver.handle_packet(make_file_start(1, "a.bin", 5000, 2, 0, to=RECEIVER, sender=SENDER))
-    _assert_failed(events, receiver, "bad_packet")
+    _assert_failed(events, receiver, FileFailReason.BAD_PACKET.value)
 
 
 def test_same_transfer_id_from_two_senders_fails_both(
@@ -323,7 +328,7 @@ def test_same_transfer_id_from_two_senders_fails_both(
     receiver.handle_packet(make_file_chunk(1, 0, b"abc"))
     receiver.handle_packet(make_file_end(1))
     failed = _of(_drain(events), EventType.FILE_FAILED, "download")
-    assert [e.data["reason"] for e in failed] == ["transfer_id_conflict"] * 2
+    assert [e.data["reason"] for e in failed] == [FileFailReason.TRANSFER_ID_CONFLICT.value] * 2
     assert list(receiver.target_dir.iterdir()) == []
 
 
@@ -338,7 +343,7 @@ def test_abort_all_fails_open_transfers_and_removes_part_files(
     receiver.abort_all()   # second call is a no-op
     failed = _of(_drain(events), EventType.FILE_FAILED, "download")
     assert sorted(e.data["transfer_id"] for e in failed) == [1, 2]
-    assert {e.data["reason"] for e in failed} == {"connection_lost"}
+    assert {e.data["reason"] for e in failed} == {FileFailReason.CONNECTION_LOST.value}
     assert _part_files(receiver) == []
 
 

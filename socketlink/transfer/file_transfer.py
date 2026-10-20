@@ -13,10 +13,10 @@ path component is kept (path traversal protection).
 Chunks are written to a hidden ".part" file while they arrive, so memory use stays at
 one chunk per transfer. The real file appears only after the chunk count and CRC32 match.
 
-`reason` values of FILE_FAILED (no constant list in constants.py yet):
-    upload:   invalid_file, read_error, send_error, cancelled
-    download: file_too_large, bad_packet, bad_chunk, transfer_id_conflict,
-              missing_chunks, checksum_mismatch, write_error, connection_lost
+`reason` of FILE_FAILED is always a FileFailReason value (common/constants.py):
+    upload:   INVALID_FILE, READ_ERROR, SEND_ERROR, CANCELLED
+    download: FILE_TOO_LARGE, BAD_PACKET, BAD_CHUNK, TRANSFER_ID_CONFLICT,
+              MISSING_CHUNKS, CHECKSUM_MISMATCH, WRITE_ERROR, CONNECTION_LOST
 """
 
 from __future__ import annotations
@@ -32,7 +32,12 @@ from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Any, BinaryIO
 
-from socketlink.common.constants import FILE_CHUNK_SIZE, MAX_FILE_SIZE, MessageType
+from socketlink.common.constants import (
+    FILE_CHUNK_SIZE,
+    MAX_FILE_SIZE,
+    FileFailReason,
+    MessageType,
+)
 from socketlink.common.events import Event, EventBus, EventType
 from socketlink.common.exceptions import (
     FileTransferError,
@@ -114,14 +119,14 @@ class FileSender:
             size = self.validate()
         except (ValidationError, OSError) as exc:
             log.warning("Transfer %d not started: %s", self.transfer_id, exc)
-            self._publish_failed("invalid_file")
+            self._publish_failed(FileFailReason.INVALID_FILE.value)
             return
 
         try:
             checksum = _file_crc32(self.path)
         except OSError as exc:
             log.warning("Transfer %d: cannot read %s: %s", self.transfer_id, self.path, exc)
-            self._publish_failed("read_error")
+            self._publish_failed(FileFailReason.READ_ERROR.value)
             return
 
         total_chunks = math.ceil(size / FILE_CHUNK_SIZE)
@@ -133,7 +138,7 @@ class FileSender:
             self._send(make_file_end(self.transfer_id))
         except (SocketLinkError, OSError) as exc:
             log.warning("Transfer %d failed while sending: %s", self.transfer_id, exc)
-            self._publish_failed("send_error")
+            self._publish_failed(FileFailReason.SEND_ERROR.value)
             return
 
         log.info("Transfer %d: sent %s (%d bytes) to %s",
@@ -157,7 +162,7 @@ class FileSender:
                 for chunk_index in range(total_chunks):
                     if self._cancel_event.is_set():
                         log.info("Transfer %d cancelled", self.transfer_id)
-                        self._end_early("cancelled")
+                        self._end_early(FileFailReason.CANCELLED.value)
                         return False
                     data = file.read(FILE_CHUNK_SIZE)
                     if not data:
@@ -168,7 +173,7 @@ class FileSender:
                         self._publish_progress(done_bytes, size)
         except (FileTransferError, OSError) as exc:
             log.warning("Transfer %d: cannot read %s: %s", self.transfer_id, self.path, exc)
-            self._end_early("read_error")
+            self._end_early(FileFailReason.READ_ERROR.value)
             return False
         self._publish_progress(done_bytes, size)
         return True
@@ -249,7 +254,7 @@ class FileReceiver:
             except MalformedPacketError as exc:
                 log.warning("Ignoring malformed %s: %s", packet.type.name, exc)
 
-    def abort_all(self, reason: str = "connection_lost") -> None:
+    def abort_all(self, reason: str = FileFailReason.CONNECTION_LOST.value) -> None:
         """Drop every unfinished download (e.g. the connection was lost) and publish
         FILE_FAILED for each one. Safe to call more than once."""
         with self._lock:
@@ -268,7 +273,7 @@ class FileReceiver:
             filename = str(fields.get("filename") or "")
         except MalformedPacketError as exc:
             log.warning("Transfer %d: bad FILE_START: %s", transfer_id, exc)
-            self._publish_failed(transfer_id, "bad_packet")
+            self._publish_failed(transfer_id, FileFailReason.BAD_PACKET.value)
             return
 
         # FILE_CHUNK carries no sender, so two senders using the same transfer_id at
@@ -277,18 +282,18 @@ class FileReceiver:
         if old is not None:
             log.warning("Transfer %d from %s collides with one from %s",
                         transfer_id, sender, old.sender)
-            self._fail(old, "transfer_id_conflict")
-            self._publish_failed(transfer_id, "transfer_id_conflict")
+            self._fail(old, FileFailReason.TRANSFER_ID_CONFLICT.value)
+            self._publish_failed(transfer_id, FileFailReason.TRANSFER_ID_CONFLICT.value)
             return
 
         if size > MAX_FILE_SIZE:
             log.warning("Transfer %d from %s is too large (%d bytes)", transfer_id, sender, size)
-            self._publish_failed(transfer_id, "file_too_large")
+            self._publish_failed(transfer_id, FileFailReason.FILE_TOO_LARGE.value)
             return
         if size < 0 or total_chunks != math.ceil(size / FILE_CHUNK_SIZE):
             log.warning("Transfer %d: %d chunks do not fit %d bytes",
                         transfer_id, total_chunks, size)
-            self._publish_failed(transfer_id, "bad_packet")
+            self._publish_failed(transfer_id, FileFailReason.BAD_PACKET.value)
             return
 
         try:
@@ -298,7 +303,7 @@ class FileReceiver:
         except OSError as exc:
             log.error("Transfer %d: cannot create a file in %s: %s",
                       transfer_id, self.target_dir, exc)
-            self._publish_failed(transfer_id, "write_error")
+            self._publish_failed(transfer_id, FileFailReason.WRITE_ERROR.value)
             return
 
         self._transfers[transfer_id] = _IncomingTransfer(
@@ -327,13 +332,13 @@ class FileReceiver:
                 or transfer.done_bytes + len(data) > transfer.size):
             log.warning("Transfer %d: unexpected chunk %d (expected %d, %d bytes)",
                         transfer_id, chunk_index, transfer.next_chunk, len(data))
-            self._fail(transfer, "bad_chunk")
+            self._fail(transfer, FileFailReason.BAD_CHUNK.value)
             return
         try:
             transfer.part_file.write(data)
         except OSError as exc:
             log.error("Transfer %d: write failed: %s", transfer_id, exc)
-            self._fail(transfer, "write_error")
+            self._fail(transfer, FileFailReason.WRITE_ERROR.value)
             return
         transfer.crc = zlib.crc32(data, transfer.crc)
         transfer.next_chunk += 1
@@ -350,12 +355,12 @@ class FileReceiver:
         if transfer.next_chunk != transfer.total_chunks or transfer.done_bytes != transfer.size:
             log.warning("Transfer %d: got %d of %d chunks",
                         transfer_id, transfer.next_chunk, transfer.total_chunks)
-            self._fail(transfer, "missing_chunks")
+            self._fail(transfer, FileFailReason.MISSING_CHUNKS.value)
             return
         if transfer.crc != transfer.checksum:
             log.warning("Transfer %d: CRC32 %d != %d",
                         transfer_id, transfer.crc, transfer.checksum)
-            self._fail(transfer, "checksum_mismatch")
+            self._fail(transfer, FileFailReason.CHECKSUM_MISMATCH.value)
             return
         target: Path | None = None
         try:
@@ -366,7 +371,7 @@ class FileReceiver:
             log.error("Transfer %d: cannot save %s: %s", transfer_id, transfer.filename, exc)
             if target is not None:
                 target.unlink(missing_ok=True)
-            self._fail(transfer, "write_error")
+            self._fail(transfer, FileFailReason.WRITE_ERROR.value)
             return
         del self._transfers[transfer_id]
         self._publish_progress(transfer)
