@@ -17,9 +17,13 @@ import pytest
 
 import socketlink.server.server as server_module
 from socketlink.common.config import ServerConfig
-from socketlink.common.constants import DisconnectReason, ErrorCode, MessageType
+from socketlink.common.constants import DisconnectReason, ErrorCode, MessageType, TransportMode
 from socketlink.common.events import Event, EventBus, EventType
-from socketlink.common.exceptions import ConnectionClosedError, TransportTimeoutError
+from socketlink.common.exceptions import (
+    ConnectionClosedError,
+    TransportTimeoutError,
+    ValidationError,
+)
 from socketlink.common.protocol import (
     Packet,
     make_bye,
@@ -27,7 +31,8 @@ from socketlink.common.protocol import (
     make_hello,
     make_ping,
 )
-from socketlink.common.transport import TcpTransport
+from socketlink.common.transport import TcpTransport, Transport
+from socketlink.reliability.reliable_udp import ReliableUdpTransport
 from socketlink.server.server import ChatServer
 
 pytestmark = pytest.mark.integration
@@ -56,7 +61,7 @@ def wait_for_event(
             return event
 
 
-def receive_type(transport: TcpTransport, wanted: MessageType) -> Packet:
+def receive_type(transport: Transport, wanted: MessageType) -> Packet:
     """Next packet of type `wanted`; other packets (USER_LIST updates...) are skipped."""
     deadline = time.monotonic() + WAIT
     while True:
@@ -302,8 +307,12 @@ def test_server_waits_for_the_client_to_close_after_bye(env: Env) -> None:
     stopper = threading.Thread(target=env.server.stop)
     stopper.start()
     receive_type(alice, MessageType.BYE)
-    with pytest.raises(TransportTimeoutError):  # still open: the server drains, it does not hang up
-        alice.receive(timeout=0.3)
+    deadline = time.monotonic() + 0.3
+    while True:  # still open: the server drains, it does not hang up (ConnectionClosedError fails)
+        try:
+            alice.receive(timeout=max(deadline - time.monotonic(), 0.01))
+        except TransportTimeoutError:
+            break
     alice.close()
     stopper.join(timeout=WAIT)
     assert not stopper.is_alive()
@@ -356,3 +365,102 @@ def test_a_valid_packet_resets_the_malformed_counter(env: Env) -> None:
         receive_type(alice, MessageType.PONG)
     alice.send(make_ping())
     receive_type(alice, MessageType.PONG)  # 8 bad packets in total, still connected
+
+
+def test_watchdog_disconnects_a_silent_client(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server_module, "CONNECTION_TIMEOUT", 0.5)
+    alice = env.join("alice")
+    bye = receive_type(alice, MessageType.BYE)
+    assert bye.json_payload()["reason"] == "timeout"
+    left = wait_for_event(env.events, EventType.CLIENT_LEFT)
+    assert left.data == {"username": "alice", "reason": DisconnectReason.TIMEOUT.value}
+
+
+def test_watchdog_keeps_a_client_that_sends_pings(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_module, "CONNECTION_TIMEOUT", 1.0)
+    alice = env.join("alice")
+    for _ in range(6):
+        alice.send(make_ping())
+        receive_type(alice, MessageType.PONG)
+        time.sleep(0.4)
+    assert [c.username for c in env.server.get_clients()] == ["alice"]
+
+
+def test_kick_sends_bye_and_removes_the_client(env: Env) -> None:
+    alice, bob = env.join("alice"), env.join("bob")
+    env.server.kick("ALICE")
+    bye = receive_type(alice, MessageType.BYE)
+    assert bye.json_payload()["reason"] == "kicked_by_admin"
+    left = wait_for_event(env.events, EventType.CLIENT_LEFT)
+    assert left.data == {"username": "alice", "reason": DisconnectReason.KICKED_BY_ADMIN.value}
+    while receive_type(bob, MessageType.USER_LIST).json_payload()["users"] != ["bob"]:
+        pass
+
+
+def test_kick_of_an_unknown_user_is_ignored(env: Env) -> None:
+    env.server.kick("nobody")
+    assert env.server.get_clients() == []
+
+
+def test_get_stats_counts_traffic_and_keeps_clients_that_left(env: Env) -> None:
+    alice = env.join("alice")
+    for _ in range(3):
+        alice.send(make_ping())
+        receive_type(alice, MessageType.PONG)
+    stats = env.server.get_stats()
+    assert stats["packets_received"] >= 4  # HELLO and three PINGs
+    assert stats["packets_sent"] >= 4      # WELCOME, USER_LIST and PONGs
+    assert "avg_rtt_ms" in stats
+    alice.send(make_bye())
+    wait_for_event(env.events, EventType.CLIENT_LEFT)
+    assert env.server.get_stats()["packets_received"] > stats["packets_received"]
+
+
+def test_stats_updated_is_published_by_the_watchdog(env: Env) -> None:
+    event = wait_for_event(env.events, EventType.STATS_UPDATED)
+    event.validate()
+    assert "packets_sent" in event.data["stats"]
+
+
+def test_set_network_conditions_is_validated_and_ignored_by_tcp(env: Env) -> None:
+    env.join("alice")
+    env.server.set_network_conditions(0.2, 50)  # TCP: accepted, nothing to simulate
+    for loss_rate, delay_ms in ((0.9, 0), (-0.1, 0), (0.1, 5000), (0.1, -1)):
+        with pytest.raises(ValidationError):
+            env.server.set_network_conditions(loss_rate, delay_ms)
+
+
+def test_udp_transports_get_network_conditions_and_window_size() -> None:
+    environment = start_env(
+        ServerConfig(host=HOST, port=0, mode=TransportMode.UDP, window_size=2)
+    )
+    clients: list[ReliableUdpTransport] = []
+    try:
+        alice = ReliableUdpTransport.connect(HOST, environment.port)
+        clients.append(alice)
+        alice.send(make_hello("alice"))
+        receive_type(alice, MessageType.WELCOME)
+        environment.server.set_network_conditions(0.25, 20)
+        server_side = environment.server._clients["alice"].transport
+        assert isinstance(server_side, ReliableUdpTransport)
+        assert (server_side.loss_simulator.loss_rate, server_side.loss_simulator.delay_ms) == (
+            0.25,
+            20,
+        )
+        assert server_side._window_size == 2
+        # A client that connects later gets the current delay (loss reset to keep this fast).
+        environment.server.set_network_conditions(0.0, 20)
+        bob = ReliableUdpTransport.connect(HOST, environment.port)
+        clients.append(bob)
+        bob.send(make_hello("bob"))
+        receive_type(bob, MessageType.WELCOME)
+        later = environment.server._clients["bob"].transport
+        assert isinstance(later, ReliableUdpTransport)
+        assert later.loss_simulator.delay_ms == 20
+        assert later._window_size == 2
+    finally:
+        for client in clients:
+            client.close()
+        environment.server.stop()
