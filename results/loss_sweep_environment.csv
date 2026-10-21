@@ -1,0 +1,2 @@
+results_file,command,messages_per_run,repeats,loss_rates,window_sizes,network,operating_system,os_build,processor,python_version,measurement_date
+loss_sweep.csv,"python -m benchmarks.bench_loss_sweep --repeats 5 --messages 200",200,5,"0%, 10%, 20%, 30%","1, 4, 8","localhost with simulated loss",Windows 10,26300,12th Gen Intel(R) Core(TM) i5-12500H,3.14.8,2026-10-21
