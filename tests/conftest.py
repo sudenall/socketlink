@@ -78,18 +78,15 @@ def event_queue(event_bus: EventBus) -> queue.Queue[Event]:
 def running_server(request: pytest.FixtureRequest, event_bus: EventBus) -> Iterator[RunningServer]:
     """Start a ChatServer on localhost with port 0 and yield it.
 
-    Parametrized by transport mode (TCP only until reliable UDP is ready; add
-    TransportMode.UDP to `params` then). The real port is read from SERVER_STARTED.
-    Skips the test while ChatServer is still a skeleton.
+    Parametrized by transport mode: TCP by default; a test can run it in UDP mode too with
+    `@pytest.mark.parametrize("running_server", [...], indirect=True)`. The real port is
+    read from SERVER_STARTED.
     """
     mode: TransportMode = request.param
     events = event_bus.subscribe_queue()
     config = ServerConfig(host="127.0.0.1", port=0, mode=mode)
     server = ChatServer(event_bus, config)
-    try:
-        server.start()
-    except NotImplementedError:
-        pytest.skip("ChatServer.start() is not implemented yet")
+    server.start()
     try:
         started = wait_for_event(events, EventType.SERVER_STARTED)
         yield RunningServer(
