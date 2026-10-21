@@ -1,4 +1,5 @@
-"""Tests for gui/server_gui.py: the demo server and the dashboard's event handling.
+"""Tests for gui/server_gui.py: the demo server, the dashboard's event handling and the
+dashboard driving the real ChatServer.
 
 OWNER: Tina
 
@@ -9,15 +10,24 @@ Message boxes are replaced so no test ever waits for a click.
 from __future__ import annotations
 
 import queue
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 
 import pytest
 
 tk = pytest.importorskip("tkinter")
 
 from socketlink.common.config import ServerConfig  # noqa: E402
-from socketlink.common.constants import DisconnectReason, TransportMode  # noqa: E402
+from socketlink.common.constants import (  # noqa: E402
+    CONNECT_TIMEOUT,
+    DisconnectReason,
+    MessageType,
+    TransportMode,
+)
 from socketlink.common.events import Event, EventBus, EventType  # noqa: E402
+from socketlink.common.exceptions import ValidationError  # noqa: E402
+from socketlink.common.protocol import make_hello  # noqa: E402
+from socketlink.common.transport import TcpTransport  # noqa: E402
 from socketlink.gui import server_gui  # noqa: E402
 from socketlink.gui.server_gui import DemoServer, ServerApp  # noqa: E402
 from socketlink.server.server import ChatServer, ClientInfo  # noqa: E402
@@ -120,6 +130,30 @@ def _log_text(app: ServerApp) -> str:
     return app.log_text.get("1.0", tk.END)
 
 
+def _wait_for(app: ServerApp, condition: Callable[[], bool], timeout: float = 5.0) -> None:
+    """Pump events and Tk callbacks until `condition()` is true (work done in threads)."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "condition not reached in time"
+        _pump(app)
+        app.root.update()
+        time.sleep(0.02)
+
+
+def _close(app: ServerApp) -> None:
+    """Call on_close and run Tk until the window is really destroyed."""
+    app.on_close()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            app.root.winfo_exists()   # raises once the window is destroyed
+        except tk.TclError:
+            return
+        app.root.update()
+        time.sleep(0.02)
+    raise AssertionError("window was not closed")
+
+
 def test_initial_state_is_stopped(root: tk.Tk) -> None:
     app = _app(root)
     assert app.status_label.cget("text") == "Stopped"
@@ -146,11 +180,26 @@ def test_demo_start_fill_table_and_stop(root: tk.Tk, dialogs: list[str]) -> None
     assert "joined from 127.0.0.1:" in _log_text(app)
 
     app._on_stop()
-    _pump(app)
-    assert app.status_label.cget("text") == "Stopped"
+    _wait_for(app, lambda: app.status_label.cget("text") == "Stopped")
     assert app.client_table.get_children() == ()
     assert app.server is None
     assert dialogs == []
+
+
+def test_stop_runs_in_a_worker_thread(root: tk.Tk, dialogs: list[str]) -> None:
+    class SlowStopServer(DemoServer):
+        def stop(self) -> None:
+            time.sleep(0.5)
+            super().stop()
+
+    app = _app(root, server_class=SlowStopServer)
+    app._on_start()
+    _pump(app)
+    started = time.monotonic()
+    app._on_stop()
+    assert time.monotonic() - started < 0.3    # the window did not wait for stop()
+    assert app.status_label.cget("text") == "Stopping..."
+    _wait_for(app, lambda: app.status_label.cget("text") == "Stopped")
 
 
 def test_kick_selected_client(root: tk.Tk, dialogs: list[str]) -> None:
@@ -165,8 +214,22 @@ def test_kick_selected_client(root: tk.Tk, dialogs: list[str]) -> None:
     _pump(app)
     assert dialogs == ["ask"]
     assert name not in app.client_table.get_children()
-    assert f"{name} left ({DisconnectReason.KICKED_BY_ADMIN.value})" in _log_text(app)
-    app.on_close()
+    assert f"{name} was kicked by the admin" in _log_text(app)
+    _close(app)
+
+
+@pytest.mark.parametrize(("reason", "text"), [
+    (DisconnectReason.USER.value, "left"),
+    (DisconnectReason.TIMEOUT.value, "timed out (no traffic)"),
+    (DisconnectReason.CONNECTION_LOST.value, "lost the connection"),
+    ("something_new", "left (something_new)"),
+])
+def test_left_text(reason: str, text: str) -> None:
+    assert server_gui._left_text(reason) == text
+
+
+def test_every_disconnect_reason_has_a_text() -> None:
+    assert set(server_gui._LEFT_TEXT) == set(DisconnectReason)
 
 
 def test_server_not_ready_shows_info(root: tk.Tk, dialogs: list[str]) -> None:
@@ -214,7 +277,22 @@ def test_udp_mode_enables_apply_only_while_running(root: tk.Tk, dialogs: list[st
     app._on_apply_network()
     assert app.server.config.loss_rate == pytest.approx(0.2)
     assert app.server.config.delay_ms == 150
-    app.on_close()
+    _close(app)
+
+
+def test_rejected_network_conditions_show_error(root: tk.Tk, dialogs: list[str]) -> None:
+    class StrictServer(DemoServer):
+        def set_network_conditions(self, loss_rate: float, delay_ms: int) -> None:
+            raise ValidationError("loss_rate must be between 0 and 0.5.")
+
+    app = _app(root, server_class=StrictServer)
+    app.mode_var.set(TransportMode.UDP.value)
+    app._on_start()
+    _pump(app)
+    app._on_apply_network()
+    assert dialogs == ["error"]
+    assert "Network conditions" not in _log_text(app)
+    _close(app)
 
 
 def test_log_error_and_stats_events_are_shown(root: tk.Tk) -> None:
@@ -247,7 +325,7 @@ def test_failing_event_does_not_stop_polling(root: tk.Tk,
     app._poll_events()
     assert handled == [EventType.LOG]
     assert app._poll_after_id is not None
-    app.on_close()
+    _close(app)
 
 
 def test_log_keeps_only_last_lines(root: tk.Tk) -> None:
@@ -275,5 +353,39 @@ def test_on_close_stops_running_server(root: tk.Tk, dialogs: list[str]) -> None:
     app = _app(root)
     app._on_start()
     server = app.server
-    app.on_close()
+    _close(app)
     assert server is not None and not server.is_running
+
+
+# ---- real ChatServer ----------------------------------------------------------------
+@pytest.mark.integration
+def test_real_server_start_join_kick_and_stop(root: tk.Tk, dialogs: list[str]) -> None:
+    app = _app(root, server_class=ChatServer)
+    ports: list[int] = []
+    app.event_bus.subscribe(EventType.SERVER_STARTED, lambda e: ports.append(e.data["port"]))
+    app.host_var.set("127.0.0.1")
+    app.port_var.set("0")   # the OS picks a free port (D-15)
+    app._on_start()
+    try:
+        _wait_for(app, lambda: app.status_label.cget("text") == "Running")
+        client = TcpTransport.connect("127.0.0.1", ports[0])
+        try:
+            client.send(make_hello("alice"))
+            assert client.receive(timeout=CONNECT_TIMEOUT).type == MessageType.WELCOME
+            _wait_for(app, lambda: "alice" in app.client_table.get_children())
+            assert app.client_count_label.cget("text") == "1"
+
+            app.client_table.selection_set("alice")
+            app._on_kick_selected()
+            _wait_for(app, lambda: "alice was kicked by the admin" in _log_text(app))
+            assert "alice" not in app.client_table.get_children()
+        finally:
+            client.close()
+
+        app._on_stop()
+        _wait_for(app, lambda: app.status_label.cget("text") == "Stopped")
+        assert app.server is None
+        assert dialogs == ["ask"]
+    finally:
+        if app.server is not None:
+            app.server.stop()
