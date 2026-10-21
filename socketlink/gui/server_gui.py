@@ -14,14 +14,19 @@ Required widgets (README section 7, Tina's checklist):
 - Totals / statistics panel (STATS_UPDATED)
 - Network simulation panel (UDP only): loss %, delay ms
 
+`python run_server.py` drives the real ChatServer: the server's log records reach the
+live log through an EventBusLogHandler, and stop() runs in a worker thread because it can
+take about a second (it says BYE to every client and joins their threads).
+
 Demo mode (`python run_server.py --demo`): `DemoServer` replaces ChatServer and
 publishes fake events from a background thread, so the dashboard can be used and shown
-before the real server exists. It goes through the same EventBus queue as the real one.
+without any client. It goes through the same EventBus queue as the real one.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import queue
 import random
 import threading
@@ -35,6 +40,7 @@ from tkinter import messagebox, ttk
 from socketlink.common.config import ServerConfig
 from socketlink.common.constants import (
     APP_NAME,
+    CONNECT_TIMEOUT,
     GUI_POLL_INTERVAL_MS,
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,
@@ -45,9 +51,12 @@ from socketlink.common.constants import (
 )
 from socketlink.common.events import Event, EventBus, EventType
 from socketlink.common.exceptions import ValidationError
+from socketlink.common.logger import attach_event_bus_handler, get_logger
 from socketlink.common.stats import TransportStats
 from socketlink.gui import theme
 from socketlink.server.server import ChatServer, ClientInfo
+
+log = get_logger(__name__)
 
 # Same limit as the client packet log (README section 7).
 # TODO(Sude): move to constants.py as MAX_LOG_LINES if approved.
@@ -69,11 +78,26 @@ _STAT_ROWS = (
     ("bytes_sent", "Bytes sent"),
     ("bytes_received", "Bytes received"),
     ("retransmissions", "Retransmissions"),
-    ("packets_dropped_simulated", "Dropped (simulated)"),
-    ("duplicates_received", "Duplicates"),
+    ("packets_dropped_simulated", "Simulated drops"),
+    ("duplicates_received", "Duplicates received"),
     ("checksum_errors", "Checksum errors"),
-    ("avg_rtt_ms", "Avg RTT (ms)"),
+    ("avg_rtt_ms", "Average RTT (ms)"),
 )
+
+# User-facing text for the `reason` of CLIENT_LEFT: "<username> <text>".
+_LEFT_TEXT = {
+    DisconnectReason.USER: "left",
+    DisconnectReason.SERVER_SHUTDOWN: "was disconnected (server shutdown)",
+    DisconnectReason.KICKED_BY_ADMIN: "was kicked by the admin",
+    DisconnectReason.TIMEOUT: "timed out (no traffic)",
+    DisconnectReason.CONNECTION_LOST: "lost the connection",
+    DisconnectReason.REJECTED: "was rejected",
+    DisconnectReason.CONNECT_FAILED: "could not connect",
+    DisconnectReason.INTERNAL_ERROR: "left after an internal error",
+}
+
+# Live log lines already get a time and a level from _append_log.
+_LIVE_LOG_FORMAT = "%(threadName)s: %(message)s"
 
 
 class ServerApp:
@@ -85,6 +109,8 @@ class ServerApp:
         self.server_class = server_class
         self.server: ChatServer | None = None
         self._poll_after_id: str | None = None
+        self._stopper: threading.Thread | None = None
+        self._closing = False
 
     def build_ui(self) -> None:
         """Build every panel and start polling the event queue."""
@@ -285,10 +311,7 @@ class ServerApp:
             loss_rate=self.loss_percent_var.get() / 100,
             delay_ms=self.delay_ms_var.get(),
         )
-        try:
-            config.validate()
-        except NotImplementedError:
-            pass  # TODO(Tina): remove once Nevin's ServerConfig.validate() is on main
+        config.validate()
         return config
 
     def _on_start(self) -> None:
@@ -303,7 +326,7 @@ class ServerApp:
         except NotImplementedError:
             messagebox.showinfo(
                 "Server not ready",
-                "ChatServer is not implemented yet.\n"
+                f"The {config.mode.name} server is not available in this build.\n"
                 "Start the dashboard with --demo to try it with fake clients.",
                 parent=self.root,
             )
@@ -319,14 +342,31 @@ class ServerApp:
     def _on_stop(self) -> None:
         if self.server is not None:
             self.stop_button.configure(state=tk.DISABLED)
-            self.server.stop()
+            self.status_label.configure(text="Stopping...", fg=theme.COLOR_CONNECTING)
+            self._stop_server_in_background()   # SERVER_STOPPED updates the panel
+
+    def _stop_server_in_background(self) -> threading.Thread | None:
+        """Run server.stop() in a worker thread so the window never freezes.
+
+        Returns the worker (or None when no server runs); a second call reuses it.
+        """
+        if self.server is None:
+            return None
+        if self._stopper is None or not self._stopper.is_alive():
+            self._stopper = threading.Thread(target=_stop_server, args=(self.server,),
+                                             name="gui-stop", daemon=True)
+            self._stopper.start()
+        return self._stopper
 
     def _on_apply_network(self) -> None:
-        if self.server is not None:
-            self.server.set_network_conditions(self.loss_percent_var.get() / 100,
-                                               self.delay_ms_var.get())
-            self._append_log("INFO", f"Network conditions: loss {self.loss_percent_var.get()}%,"
-                                     f" delay {self.delay_ms_var.get()} ms")
+        if self.server is None:
+            return
+        loss_percent, delay_ms = self.loss_percent_var.get(), self.delay_ms_var.get()
+        try:
+            self.server.set_network_conditions(loss_percent / 100, delay_ms)
+        except ValidationError as exc:
+            messagebox.showerror("Invalid network conditions", str(exc), parent=self.root)
+        # On success the server logs "Network conditions: ..." and it reaches the live log.
 
     def _on_table_right_click(self, event: tk.Event[ttk.Treeview]) -> None:
         row = self.client_table.identify_row(event.y)
@@ -344,12 +384,19 @@ class ServerApp:
 
     # ---- events ------------------------------------------------------------------
     def _poll_events(self) -> None:
-        """Drain self.events without blocking, then reschedule with root.after."""
-        try:
-            while True:
-                self._handle_event(self.events.get_nowait())
-        except queue.Empty:
-            pass
+        """Drain self.events without blocking, then reschedule with root.after.
+
+        A failing event is logged and skipped, so one bad event never stops the polling.
+        """
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._handle_event(event)
+            except Exception:  # noqa: BLE001 - keep the dashboard alive, the error is logged
+                log.exception("Could not show %s event", event.type.value)
         self._poll_after_id = self.root.after(GUI_POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, event: Event) -> None:
@@ -363,13 +410,13 @@ class ServerApp:
             self.server = None
             self._set_running(False)
             self._show_clients([])
-            self._append_log("INFO", f"Server stopped ({data['reason']})")
+            self._append_log("INFO", "Server stopped")
         elif event.type == EventType.CLIENT_JOINED:
             self._append_log("JOINED", f"{data['username']} joined from "
                                        f"{_format_address(data['address'])}")
             self._refresh_clients()
         elif event.type == EventType.CLIENT_LEFT:
-            self._append_log("LEFT", f"{data['username']} left ({data['reason']})")
+            self._append_log("LEFT", f"{data['username']} {_left_text(data['reason'])}")
             self._refresh_clients()
         elif event.type == EventType.STATS_UPDATED:
             self._show_stats(data["stats"])
@@ -443,13 +490,26 @@ class ServerApp:
             self.log_text.configure(state=tk.DISABLED)
 
     def on_close(self) -> None:
-        """Stop the server cleanly, then root.destroy()."""
+        """Stop the server cleanly, then root.destroy().
+
+        The window stays responsive while the server says BYE to its clients; it closes
+        at the latest after CONNECT_TIMEOUT even if a client never answers.
+        """
+        if self._closing:
+            return
+        self._closing = True
+        self.status_label.configure(text="Stopping...", fg=theme.COLOR_CONNECTING)
+        stopper = self._stop_server_in_background()
+        self._close_when_stopped(stopper, time.monotonic() + CONNECT_TIMEOUT)
+
+    def _close_when_stopped(self, stopper: threading.Thread | None, deadline: float) -> None:
+        if stopper is not None and stopper.is_alive() and time.monotonic() < deadline:
+            self.root.after(GUI_POLL_INTERVAL_MS, self._close_when_stopped, stopper, deadline)
+            return
         if self._poll_after_id is not None:
             self.root.after_cancel(self._poll_after_id)
             self._poll_after_id = None
-        if self.server is not None:
-            self.server.stop()
-            self.server = None
+        self.server = None
         self.root.destroy()
 
 
@@ -508,6 +568,7 @@ class DemoServer(ChatServer):
     def set_network_conditions(self, loss_rate: float, delay_ms: int) -> None:
         self.config.loss_rate = loss_rate
         self.config.delay_ms = delay_ms
+        log.info("Network conditions: loss %.0f %%, delay %d ms", loss_rate * 100, delay_ms)
 
     # ---- fake traffic -------------------------------------------------------------
     def _run(self) -> None:
@@ -563,6 +624,21 @@ class DemoServer(ChatServer):
         self.event_bus.publish(Event(event_type, data, source="server"))
 
 
+def _stop_server(server: ChatServer) -> None:
+    """Worker for the gui-stop thread; never lets an exception escape."""
+    try:
+        server.stop()
+    except Exception:  # noqa: BLE001 - a failing stop must not kill the thread silently
+        log.exception("Server stop failed")
+
+
+def _left_text(reason: str) -> str:
+    try:
+        return _LEFT_TEXT[DisconnectReason(reason)]
+    except (ValueError, KeyError):
+        return f"left ({reason})"
+
+
 def _format_address(address: Sequence[object]) -> str:
     host, port = address[0], address[1]
     return f"{host}:{port}"
@@ -580,6 +656,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     root = tk.Tk()
     app = ServerApp(root, server_class=DemoServer if args.demo else ChatServer)
+    live_log = attach_event_bus_handler(app.event_bus)
+    live_log.setFormatter(logging.Formatter(_LIVE_LOG_FORMAT))
     app.build_ui()
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
