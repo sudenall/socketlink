@@ -56,7 +56,9 @@ def _deliver_all(alice: Peer, bob: Peer, messages: int) -> None:
     deadline = time.monotonic() + RUN_TIMEOUT
     while received < messages:
         if time.monotonic() > deadline:
-            raise RunFailedError(f"only {received} of {messages} messages after {RUN_TIMEOUT:.0f} s")
+            raise RunFailedError(
+                f"only {received} of {messages} messages after {RUN_TIMEOUT:.0f} s"
+            )
         for event in _drain(bob.events, wait=0.2):
             if event.type is EventType.MESSAGE_RECEIVED:
                 received += 1
