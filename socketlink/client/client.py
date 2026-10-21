@@ -131,7 +131,7 @@ class ChatClient:
         new_config = config or self.config
         if self._state is not ConnectionState.DISCONNECTED:
             raise InvalidStateError(f"connect() is not allowed in state {self._state.name}.")
-        self._validate_config(new_config)
+        new_config.validate()  # ValidationError; also normalizes mode "tcp"/"udp" -> enum
         self.config = new_config
         self._set_state(ConnectionState.CONNECTING)
         self._stop_event = threading.Event()
@@ -553,16 +553,6 @@ class ChatClient:
                 self._publish_error(exc)
             return False
         return True
-
-    @staticmethod
-    def _validate_config(config: ClientConfig) -> None:
-        """Raise ValidationError for a bad config (rules live in ClientConfig.validate)."""
-        try:
-            config.validate()
-        except NotImplementedError:
-            # TODO(Hamit): remove once Nevin's ClientConfig.validate() is merged.
-            if not re.fullmatch(USERNAME_PATTERN, config.username or ""):
-                raise ValidationError(f"Invalid username: {config.username!r}.") from None
 
     @staticmethod
     def _require_keys(payload: dict[str, Any], keys: tuple[str, ...], packet: Packet) -> None:

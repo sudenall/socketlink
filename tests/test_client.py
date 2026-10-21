@@ -247,6 +247,29 @@ def test_connect_with_invalid_username_raises_validation_error(
     assert chat_client.state is ConnectionState.DISCONNECTED
 
 
+@pytest.mark.parametrize("field, value", [
+    ("host", "not an ip"),
+    ("port", 80),
+    ("port", 70000),
+    ("window_size", 0),
+    ("loss_rate", 0.9),
+])
+def test_connect_with_invalid_config_raises_validation_error(
+        chat_client: ChatClient, field: str, value: object) -> None:
+    """ClientConfig.validate() (config.py) runs before anything touches the network."""
+    config = make_config(free_port())
+    setattr(config, field, value)
+    with pytest.raises(ValidationError):
+        chat_client.connect(config)
+    assert chat_client.state is ConnectionState.DISCONNECTED
+
+
+def test_connect_accepts_mode_as_plain_string(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connected = connect(chat_client, event_queue, server.port, mode="tcp")
+    assert connected.data["mode"] is TransportMode.TCP
+
+
 def test_connect_twice_raises_invalid_state(chat_client: ChatClient, server: FakeServer,
                                             event_queue: queue.Queue[Event]) -> None:
     connect(chat_client, event_queue, server.port)
