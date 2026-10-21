@@ -669,17 +669,23 @@ class ReliableUdpListener(TransportListener):
     def _route(self, data: bytes, source: Address) -> None:
         with self._lock:
             transport = self._sessions.get(source)
+            if transport is None and self._stop_event.is_set():
+                return
         if transport is None:
-            if self._stop_event.is_set() or not self._is_new_session(data):
+            if not self._is_new_session(data):
                 return  # unknown sender that is not starting a session: drop
-            transport = ReliableUdpTransport(
-                self._sock_or_fail(), source, self.event_bus,
-                has_own_socket=False, on_released=self._forget,
-            )
             with self._lock:
-                self._sessions[source] = transport
-            log.debug("New reliable UDP session from %s:%d", *source)
-            self._pending.put(transport)
+                transport = self._sessions.get(source)
+                if transport is None:
+                    if self._stop_event.is_set():
+                        return
+                    transport = ReliableUdpTransport(
+                        self._sock_or_fail(), source, self.event_bus,
+                        has_own_socket=False, on_released=self._forget,
+                    )
+                    self._sessions[source] = transport
+                    self._pending.put(transport)
+                    log.debug("New reliable UDP session from %s:%d", *source)
         transport._handle_datagram(data)
 
     @staticmethod
