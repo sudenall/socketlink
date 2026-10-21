@@ -146,6 +146,13 @@ def _plot_loss_sweep(rows: Rows, metric: str, ylabel: str, title: str, out: Path
             xs, ys, yerr=errs, color=SERIES_COLORS[i], marker=MARKERS[i], markersize=7,
             linewidth=2, capsize=3, markeredgecolor=SURFACE, markeredgewidth=1.5, label=label,
         )
+        for point, x, y in zip(points, xs, ys, strict=True):
+            failed = int(float(point.get("failed_runs") or 0))
+            if failed:  # runs whose connection died are not part of the mean: say so
+                ax.annotate(
+                    f"{failed} failed run(s) not included", (x, y), xytext=(-10, 12),
+                    textcoords="offset points", ha="right", fontsize=8, color=INK,
+                )
     ax.set_xlabel("Simulated packet loss (%)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
