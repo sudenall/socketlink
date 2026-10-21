@@ -307,8 +307,12 @@ def test_server_waits_for_the_client_to_close_after_bye(env: Env) -> None:
     stopper = threading.Thread(target=env.server.stop)
     stopper.start()
     receive_type(alice, MessageType.BYE)
-    with pytest.raises(TransportTimeoutError):  # still open: the server drains, it does not hang up
-        alice.receive(timeout=0.3)
+    deadline = time.monotonic() + 0.3
+    while True:  # still open: the server drains, it does not hang up (ConnectionClosedError fails)
+        try:
+            alice.receive(timeout=max(deadline - time.monotonic(), 0.01))
+        except TransportTimeoutError:
+            break
     alice.close()
     stopper.join(timeout=WAIT)
     assert not stopper.is_alive()

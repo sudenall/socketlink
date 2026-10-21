@@ -168,7 +168,11 @@ class ClientHandler(threading.Thread):
 
     # ---- public API used by ChatServer -----------------------------------
     def send(self, packet: Packet) -> None:
-        """Thread-safe send to this client; on failure, disconnect this client."""
+        """Thread-safe send to this client; on failure, disconnect this client.
+
+        Nothing is sent once disconnect() has started: the BYE must be the last packet."""
+        if self._is_closed:
+            return
         try:
             self.transport.send(packet)
         except TransportError as exc:
