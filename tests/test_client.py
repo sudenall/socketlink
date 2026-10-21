@@ -2,7 +2,8 @@
 
 OWNER: Hamit
 Scenarios: T-08 (closed server), T-09 (server goes down -> RECONNECTING), handshake,
-chat, heartbeat/RTT, silent server, kick, protocol errors, invalid states.
+chat, heartbeat/RTT, silent server, kick, protocol errors, invalid states, and file
+transfer (H5) through a fake relay that follows PROTOCOL.md 5.4.
 
 The fake server is defined here (not the real ChatServer) so these tests only depend
 on the protocol and transport, which are already on main. Every test listens on port 0
@@ -12,10 +13,12 @@ Shared helpers (event_bus, event_queue, wait_for_event) come from conftest.py.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +32,7 @@ from socketlink.common.constants import (
     ConnectionState,
     DisconnectReason,
     ErrorCode,
+    FileFailReason,
     MessageType,
     TransportMode,
 )
@@ -73,23 +77,36 @@ def wait_until(condition: Callable[[], bool], timeout: float = EVENT_TIMEOUT) ->
 
 
 class FakeServer:
-    """Minimal server: answers HELLO, echoes CHAT, answers PING (unless silent).
+    """Minimal server: answers HELLO, echoes CHAT, answers PING (unless silent) and
+    relays FILE_* like PROTOCOL.md 5.4 (FILE_START to `to`, adds "from"; FILE_CHUNK and
+    FILE_END follow the transfer_id recorded at FILE_START).
 
     `reject_code` makes it answer HELLO with ERROR; `answer_hello=False` makes it
     never answer; `silent=True` makes it ignore PINGs after the handshake.
+    `drop_sender_after_chunks=n` closes the sender's connection when its n-th chunk
+    arrives; `drop_target_after_chunks=n` closes the receiver's connection instead of
+    forwarding the n-th chunk.
     """
 
     def __init__(self, reject_code: str | None = None, answer_hello: bool = True,
-                 silent: bool = False) -> None:
+                 silent: bool = False, drop_sender_after_chunks: int | None = None,
+                 drop_target_after_chunks: int | None = None) -> None:
         self.reject_code = reject_code
         self.answer_hello = answer_hello
         self.silent = silent
+        self.drop_sender_after_chunks = drop_sender_after_chunks
+        self.drop_target_after_chunks = drop_target_after_chunks
         self.listener = TcpListener()
         self.received: list[p.Packet] = []
         self.connections: list[Transport] = []
         self.accepted = threading.Event()
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._next_client_id = 7
+        self._users: dict[str, Transport] = {}         # lower-cased username -> transport
+        self._names: dict[Transport, str] = {}
+        self._routes: dict[int, Transport] = {}        # transfer_id -> receiver
+        self._chunks_seen: dict[int, int] = {}         # transfer_id -> chunks relayed
 
     @property
     def port(self) -> int:
@@ -159,8 +176,16 @@ class FakeServer:
                 transport.close()
                 return
             username = packet.json_payload()["username"]
-            transport.send(p.make_welcome(7, "Fake", [username]))
+            with self._lock:
+                client_id = self._next_client_id
+                self._next_client_id += 1
+                self._users[username.lower()] = transport
+                self._names[transport] = username
+            transport.send(p.make_welcome(client_id, "Fake", [username]))
             transport.send(p.make_user_list([username]))
+        elif packet.type in (MessageType.FILE_START, MessageType.FILE_CHUNK,
+                             MessageType.FILE_END):
+            self._relay_file_packet(transport, packet)
         elif packet.type is MessageType.CHAT:
             payload = packet.json_payload()
             transport.send(p.make_chat(payload["text"], payload["to"], sender=USERNAME,
@@ -169,6 +194,48 @@ class FakeServer:
             transport.send(p.make_pong())
         elif packet.type is MessageType.BYE:
             transport.close()
+
+    def _relay_file_packet(self, transport: Transport, packet: p.Packet) -> None:
+        if packet.type is MessageType.FILE_START:
+            fields = packet.json_payload()
+            with self._lock:
+                target = self._users.get(str(fields["to"]).lower())
+                sender = self._names.get(transport, "")
+                if target is not None:
+                    self._routes[fields["transfer_id"]] = target
+                    self._chunks_seen[fields["transfer_id"]] = 0
+            if target is None:
+                transport.send(p.make_error(ErrorCode.UNKNOWN_USER.value, "no such user"))
+                return
+            target.send(p.make_file_start(
+                fields["transfer_id"], fields["filename"], fields["size"],
+                fields["total_chunks"], fields["checksum"], to=fields["to"], sender=sender,
+            ))
+            return
+        if packet.type is MessageType.FILE_CHUNK:
+            transfer_id = p.parse_file_chunk(packet)[0]
+        else:
+            transfer_id = packet.json_payload()["transfer_id"]
+        with self._lock:
+            target = self._routes.get(transfer_id)
+            if packet.type is MessageType.FILE_CHUNK and target is not None:
+                self._chunks_seen[transfer_id] += 1
+            seen = self._chunks_seen.get(transfer_id, 0)
+            if packet.type is MessageType.FILE_END:
+                self._routes.pop(transfer_id, None)
+        if target is None:
+            return
+        if packet.type is MessageType.FILE_CHUNK:
+            if seen == self.drop_sender_after_chunks:
+                transport.close()
+                return
+            if seen == self.drop_target_after_chunks:
+                target.close()
+                return
+        try:
+            target.send(packet)
+        except ConnectionClosedError:
+            pass  # receiver already gone
 
 
 @pytest.fixture(autouse=True)
@@ -648,3 +715,191 @@ def test_window_size_is_applied_again_after_reconnect(
     wait_for_state(event_queue, ConnectionState.RECONNECTING)
     wait_for(event_queue, EventType.CONNECTED)
     assert _WindowedTcpTransport.window_sizes == [2, 2]
+
+
+# --------------------------------------------------------------------------- #
+# File transfer (H5): send_file + FILE_* to FileReceiver, through the fake relay
+# --------------------------------------------------------------------------- #
+def write_random_file(folder: Path, name: str, size: int) -> Path:
+    path = folder / name
+    path.write_bytes(os.urandom(size))
+    return path
+
+
+def connect_named(event_bus: EventBus, port: int, username: str, download_dir: Path,
+                  **overrides: object) -> tuple[ChatClient, queue.Queue[Event]]:
+    """A second/third client with its own bus (chat_client is "hamit")."""
+    events = event_bus.subscribe_queue()
+    chat = ChatClient(event_bus)
+    chat.connect(make_config(port, username=username, download_dir=str(download_dir),
+                             **overrides))
+    wait_for(events, EventType.CONNECTED)
+    return chat, events
+
+
+def file_event(q: queue.Queue[Event], event_type: EventType, transfer_id: int,
+               direction: str, timeout: float = 20.0) -> Event:
+    return wait_for(q, event_type, timeout, lambda e: e.data["transfer_id"] == transfer_id
+                    and e.data["direction"] == direction)
+
+
+@pytest.fixture
+def receiver(server: FakeServer, tmp_path: Path) -> Iterator[tuple[ChatClient,
+                                                                  queue.Queue[Event]]]:
+    """User "bob" connected to `server`, downloading into tmp_path/downloads."""
+    chat, events = connect_named(EventBus(), server.port, "bob", tmp_path / "downloads")
+    yield chat, events
+    chat.disconnect()
+
+
+def test_send_file_when_disconnected_raises_invalid_state(
+        chat_client: ChatClient, tmp_path: Path) -> None:
+    path = write_random_file(tmp_path, "a.bin", 10)
+    with pytest.raises(InvalidStateError):
+        chat_client.send_file(str(path), to="bob")
+
+
+@pytest.mark.parametrize("to", [None, "", "../bob"])
+def test_send_file_without_valid_recipient_raises_validation_error(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        tmp_path: Path, to: str | None) -> None:
+    connect(chat_client, event_queue, server.port)
+    path = write_random_file(tmp_path, "a.bin", 10)
+    with pytest.raises(ValidationError):
+        chat_client.send_file(str(path), to=to)
+    assert MessageType.FILE_START not in server.types_received()
+
+
+def test_send_file_with_missing_file_raises_validation_error(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        tmp_path: Path) -> None:
+    connect(chat_client, event_queue, server.port)
+    with pytest.raises(ValidationError):
+        chat_client.send_file(str(tmp_path / "nope.bin"), to="bob")
+    assert MessageType.FILE_START not in server.types_received()
+
+
+def test_transfer_ids_carry_client_id_and_count_up(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        receiver: tuple[ChatClient, queue.Queue[Event]], tmp_path: Path) -> None:
+    connected = connect(chat_client, event_queue, server.port)
+    client_id = connected.data["client_id"]
+    path = write_random_file(tmp_path, "a.bin", 100)
+    first = chat_client.send_file(str(path), to="bob")
+    second = chat_client.send_file(str(path), to="bob")
+    assert first == p.make_transfer_id(client_id, 1)
+    assert second == p.make_transfer_id(client_id, 2)
+    assert p.transfer_id_client(first) == client_id
+
+
+def test_transfer_counter_wraps_to_one(chat_client: ChatClient) -> None:
+    chat_client._transfer_counter = client_module._MAX_TRANSFER_COUNTER
+    assert chat_client._next_transfer_counter() == 1
+
+
+def test_file_arrives_complete_with_matching_content(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        receiver: tuple[ChatClient, queue.Queue[Event]], tmp_path: Path) -> None:
+    """1 MB, TCP: FILE_OFFERED + FILE_COMPLETED on bob, FILE_COMPLETED on the sender."""
+    _, bob_events = receiver
+    connect(chat_client, event_queue, server.port)
+    path = write_random_file(tmp_path, "report.bin", 1024 * 1024)
+    transfer_id = chat_client.send_file(str(path), to="bob")
+    offered = file_event(bob_events, EventType.FILE_OFFERED, transfer_id, "download")
+    assert offered.data["from"] == USERNAME and offered.data["size"] == 1024 * 1024
+    done = file_event(bob_events, EventType.FILE_COMPLETED, transfer_id, "download")
+    saved = Path(done.data["path"])
+    assert saved.parent == tmp_path / "downloads" / "bob"
+    assert saved.read_bytes() == path.read_bytes()
+    file_event(event_queue, EventType.FILE_COMPLETED, transfer_id, "upload")
+
+
+def test_two_senders_at_once_to_the_same_receiver_do_not_collide(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        receiver: tuple[ChatClient, queue.Queue[Event]], tmp_path: Path) -> None:
+    """Both counters start at 1, but transfer_id also holds client_id (PROTOCOL 4.1)."""
+    _, bob_events = receiver
+    connect(chat_client, event_queue, server.port)
+    carol, _ = connect_named(EventBus(), server.port, "carol", tmp_path / "carol_dl")
+    try:
+        file_a = write_random_file(tmp_path, "from_hamit.bin", 300 * 1024)
+        file_b = write_random_file(tmp_path, "from_carol.bin", 300 * 1024)
+        id_a = chat_client.send_file(str(file_a), to="bob")
+        id_b = carol.send_file(str(file_b), to="bob")
+        assert id_a != id_b
+        # the two downloads finish in any order, so collect both before checking
+        saved: dict[int, Path] = {}
+        while len(saved) < 2:
+            done = wait_for(bob_events, EventType.FILE_COMPLETED, 20.0,
+                            lambda e: e.data["transfer_id"] in (id_a, id_b))
+            saved[done.data["transfer_id"]] = Path(done.data["path"])
+        assert saved[id_a].read_bytes() == file_a.read_bytes()
+        assert saved[id_b].read_bytes() == file_b.read_bytes()
+    finally:
+        carol.disconnect()
+
+
+def test_sender_connection_lost_mid_transfer_fails_the_upload(
+        chat_client: ChatClient, event_queue: queue.Queue[Event], tmp_path: Path) -> None:
+    """Part of T-16: the sender's link breaks -> FILE_FAILED(send_error), no crash."""
+    fake = FakeServer(drop_sender_after_chunks=50).start()
+    bob, _ = connect_named(EventBus(), fake.port, "bob", tmp_path / "downloads")
+    try:
+        connect(chat_client, event_queue, fake.port, auto_reconnect=False)
+        # larger than the OS socket buffers, so the sender really notices the break
+        path = write_random_file(tmp_path, "big.bin", 16 * 1024 * 1024)
+        transfer_id = chat_client.send_file(str(path), to="bob")
+        failed = file_event(event_queue, EventType.FILE_FAILED, transfer_id, "upload")
+        assert failed.data["reason"] == FileFailReason.SEND_ERROR
+        # DISCONNECTED may come before or after FILE_FAILED (two threads), so check state
+        wait_until(lambda: chat_client.state is ConnectionState.DISCONNECTED)
+    finally:
+        bob.disconnect()
+        fake.stop()
+
+
+def test_receiver_connection_lost_mid_transfer_fails_the_download(
+        chat_client: ChatClient, event_queue: queue.Queue[Event], tmp_path: Path) -> None:
+    """Part of T-16: the receiver's link breaks -> FILE_FAILED(connection_lost) and the
+    half-written .part file is removed."""
+    fake = FakeServer(drop_target_after_chunks=20).start()
+    downloads = tmp_path / "downloads"
+    bob, bob_events = connect_named(EventBus(), fake.port, "bob", downloads,
+                                    auto_reconnect=False)
+    try:
+        connect(chat_client, event_queue, fake.port)
+        path = write_random_file(tmp_path, "big.bin", 1024 * 1024)
+        transfer_id = chat_client.send_file(str(path), to="bob")
+        failed = file_event(bob_events, EventType.FILE_FAILED, transfer_id, "download")
+        assert failed.data["reason"] == FileFailReason.CONNECTION_LOST
+        assert list((downloads / "bob").iterdir()) == []
+    finally:
+        bob.disconnect()
+        fake.stop()
+
+
+def test_user_disconnect_cancels_running_uploads(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event],
+        receiver: tuple[ChatClient, queue.Queue[Event]], tmp_path: Path) -> None:
+    connect(chat_client, event_queue, server.port)
+    path = write_random_file(tmp_path, "big.bin", 16 * 1024 * 1024)
+    transfer_id = chat_client.send_file(str(path), to="bob")
+    chat_client.disconnect()
+    failed = file_event(event_queue, EventType.FILE_FAILED, transfer_id, "upload")
+    assert failed.data["reason"] in (FileFailReason.CANCELLED, FileFailReason.SEND_ERROR)
+
+
+def test_file_events_follow_the_event_contract(
+        event_bus: EventBus, chat_client: ChatClient, server: FakeServer,
+        event_queue: queue.Queue[Event], receiver: tuple[ChatClient, queue.Queue[Event]],
+        tmp_path: Path) -> None:
+    published: list[Event] = []
+    event_bus.subscribe(None, published.append)
+    connect(chat_client, event_queue, server.port)
+    path = write_random_file(tmp_path, "a.bin", 50 * 1024)
+    transfer_id = chat_client.send_file(str(path), to="bob")
+    file_event(event_queue, EventType.FILE_COMPLETED, transfer_id, "upload")
+    file_events = [e for e in published if e.type.name.startswith("FILE_")]
+    assert file_events
+    for event in file_events:
+        event.validate()

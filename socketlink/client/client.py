@@ -10,7 +10,9 @@ Thread model:
     connect() starts "cli-connect" thread (so the GUI never freezes)
     after WELCOME:  "cli-receiver"  loops on transport.receive()
                     "cli-heartbeat" sends PING every HEARTBEAT_INTERVAL
-All threads daemon=True and stop on self._stop_event.
+    send_file():    "cli-upload-<transfer_id>" runs one FileSender
+All threads daemon=True and stop on self._stop_event (uploads end when their
+transport is closed or the user disconnects).
 
 State machine (State pattern): use `_set_state()` for EVERY change; it checks
 STATE_TRANSITIONS (constants.py) and publishes STATE_CHANGED.
@@ -48,12 +50,14 @@ from socketlink.common.constants import (
     SOCKET_TIMEOUT,
     STATE_TRANSITIONS,
     STATS_UPDATE_INTERVAL,
+    TRANSFER_ID_COUNTER_BITS,
     USERNAME_PATTERN,
     ByeReason,
     ClientErrorCode,
     ConnectionState,
     DisconnectReason,
     ErrorCode,
+    FileFailReason,
     MessageType,
 )
 from socketlink.common.events import Event, EventBus, EventType
@@ -68,11 +72,22 @@ from socketlink.common.exceptions import (
     ValidationError,
 )
 from socketlink.common.logger import get_logger
-from socketlink.common.protocol import Packet, make_bye, make_chat, make_hello, make_ping
+from socketlink.common.protocol import (
+    Packet,
+    make_bye,
+    make_chat,
+    make_hello,
+    make_ping,
+    make_transfer_id,
+)
 from socketlink.common.stats import TransportStats
 from socketlink.common.transport import Transport, create_transport
+from socketlink.transfer.file_transfer import FileReceiver, FileSender
 
 log = get_logger(__name__)
+
+# Largest per-client transfer counter (PROTOCOL.md 4.1); after it the counter wraps to 1.
+_MAX_TRANSFER_COUNTER = (1 << TRANSFER_ID_COUNTER_BITS) - 1
 
 
 class _HandshakeError(SocketLinkError):
@@ -101,6 +116,11 @@ class ChatClient:
         self._ping_sent_at: float | None = None
         self._rtt_samples = 0
         self._avg_rtt_ms = 0.0
+        # File transfer (H5): uploads in flight and the receiver of incoming files
+        self._transfer_lock = threading.Lock()
+        self._transfer_counter = 0
+        self._uploads: dict[int, FileSender] = {}
+        self._file_receiver: FileReceiver | None = None
 
     # ---- state -----------------------------------------------------------
     @property
@@ -133,6 +153,8 @@ class ChatClient:
             raise InvalidStateError(f"connect() is not allowed in state {self._state.name}.")
         new_config.validate()  # ValidationError; also normalizes mode "tcp"/"udp" -> enum
         self.config = new_config
+        self._file_receiver = FileReceiver(new_config.download_dir, new_config.username,
+                                           self.event_bus)
         self._set_state(ConnectionState.CONNECTING)
         self._stop_event = threading.Event()
         threading.Thread(target=self._connect_worker, name="cli-connect", daemon=True).start()
@@ -173,8 +195,32 @@ class ChatClient:
         self._send_packet(make_chat(text, to))
 
     def send_file(self, path: str, to: str | None = None) -> int:
-        """Start a FileSender in a background thread. Returns transfer_id."""
-        raise NotImplementedError("TODO(Hamit + Tina)")
+        """Start a FileSender in a background thread. Returns transfer_id.
+
+        `to` is required: a file always goes to one user (PROTOCOL.md 5.4). Raises
+        InvalidStateError if not CONNECTED and ValidationError if `to` is missing or
+        invalid, or the path is not a file / larger than MAX_FILE_SIZE. Both are raised
+        at once, before anything is sent. Progress and the result arrive as
+        FILE_PROGRESS and FILE_COMPLETED / FILE_FAILED (direction='upload').
+        """
+        if self._state is not ConnectionState.CONNECTED:
+            raise InvalidStateError(f"send_file() is not allowed in state {self._state.name}.")
+        if to is None or not re.fullmatch(USERNAME_PATTERN, to):
+            raise ValidationError(f"A file needs one valid recipient, got {to!r}.")
+        transport, client_id = self._transport, self._client_id
+        if transport is None or client_id is None:
+            raise InvalidStateError("send_file() needs an open connection.")
+        transfer_id = make_transfer_id(client_id, self._next_transfer_counter())
+        # Bound to THIS transport: after a reconnect the server no longer knows the
+        # transfer, so a broken connection must end the upload (send_error), not move it.
+        sender = FileSender(path, transfer_id, transport.send, self.event_bus, to=to)
+        sender.validate()
+        with self._transfer_lock:
+            self._uploads[transfer_id] = sender
+        threading.Thread(target=self._run_upload, args=(sender,),
+                         name=f"cli-upload-{transfer_id}", daemon=True).start()
+        log.info("Sending %s to %s (transfer %d)", path, to, transfer_id)
+        return transfer_id
 
     def get_stats(self) -> dict[str, int | float]:
         """Counters of the current transport plus the PING/PONG round-trip time.
@@ -259,6 +305,7 @@ class ChatClient:
             return
         log.warning("Connection lost: %s", DisconnectReason(reason).value)
         self._close_transport()
+        self._abort_downloads()
         if not self.config.auto_reconnect:
             self._end_session(reason)
             return
@@ -293,6 +340,46 @@ class ChatClient:
             )
         stop_event.set()
         self._publish(EventType.DISCONNECTED, {"reason": DisconnectReason(reason).value})
+
+    # ---- file transfer helpers -------------------------------------------------
+    def _next_transfer_counter(self) -> int:
+        """Thread-safe counter 1.._MAX_TRANSFER_COUNTER, then back to 1."""
+        with self._transfer_lock:
+            self._transfer_counter = self._transfer_counter % _MAX_TRANSFER_COUNTER + 1
+            return self._transfer_counter
+
+    def _run_upload(self, sender: FileSender) -> None:
+        """Body of "cli-upload-<id>". FileSender.send() publishes every result itself."""
+        try:
+            sender.send()
+        except Exception as exc:  # last-resort guard: a worker thread must never die silently
+            log.exception("Upload %d crashed", sender.transfer_id)
+            self._publish(EventType.FILE_FAILED, {
+                "transfer_id": sender.transfer_id,
+                "direction": "upload",
+                "reason": FileFailReason.SEND_ERROR.value,
+            })
+            self._publish_error(exc)
+        finally:
+            with self._transfer_lock:
+                self._uploads.pop(sender.transfer_id, None)
+
+    def _cancel_uploads(self) -> None:
+        """User disconnect: every upload stops after its current chunk (reason cancelled)."""
+        with self._transfer_lock:
+            uploads = list(self._uploads.values())
+        for sender in uploads:
+            sender.cancel()
+
+    def _abort_downloads(self) -> None:
+        """The connection is gone: unfinished downloads fail with connection_lost.
+
+        Uploads need no call: their transport is closed, so their next send fails
+        (send_error).
+        """
+        receiver = self._file_receiver
+        if receiver is not None:
+            receiver.abort_all(FileFailReason.CONNECTION_LOST.value)
 
     # ---- connection helpers --------------------------------------------------
     def _connect_worker(self) -> None:
@@ -342,7 +429,7 @@ class ChatClient:
             # Before HELLO: on reliable UDP the HELLO itself already goes through the
             # simulator and the Go-Back-N window.
             transport.set_network_conditions(config.loss_rate, config.delay_ms)
-            self._apply_window_size(transport, config.window_size)
+            transport.set_window_size(config.window_size)
             transport.send(make_hello(config.username))
             deadline = time.monotonic() + CONNECT_TIMEOUT
             while True:
@@ -394,9 +481,11 @@ class ChatClient:
         except InvalidStateError:
             return False
         self._stop_event.set()
+        self._cancel_uploads()
         if self._send_packet(make_bye(), publish_failure=False):
             self._wait_for_server_close()
         self._close_transport()
+        self._abort_downloads()
         self._set_state(ConnectionState.DISCONNECTED)
         log.info("Disconnected by the user")
         self._publish(EventType.DISCONNECTED, {"reason": DisconnectReason.USER.value})
@@ -407,6 +496,7 @@ class ChatClient:
         stop_event = self._stop_event
         stop_event.set()
         self._close_transport()
+        self._abort_downloads()
         if self._state is ConnectionState.CONNECTED:
             try:
                 self._set_state(ConnectionState.DISCONNECTING)
@@ -434,20 +524,6 @@ class ChatClient:
                 transport.receive(timeout=remaining)
             except (SocketLinkError, OSError):
                 return  # closed by the server (expected), timeout, or broken stream
-
-    @staticmethod
-    def _apply_window_size(transport: Transport, window_size: int) -> None:
-        """Pass ClientConfig.window_size to the transport (reliable UDP only).
-
-        Only ReliableUdpTransport has set_window_size(); the Transport interface does
-        not, and checking the mode here is forbidden (README 9.3), so the method is
-        looked up instead. TCP has no window to set.
-        TODO(Hamit): call transport.set_window_size() directly once Transport has a
-        no-op default like set_network_conditions().
-        """
-        set_window_size = getattr(transport, "set_window_size", None)
-        if set_window_size is not None:
-            set_window_size(window_size)
 
     def _close_transport(self) -> None:
         transport = self._transport
@@ -525,8 +601,10 @@ class ChatClient:
         return None
 
     def _handle_file_packet(self, packet: Packet) -> None:
-        """Forward FILE_* packets to the FileReceiver (H5, waits for Tina's module)."""
-        log.warning("File transfer is not available yet; ignoring %s", packet.type.name)
+        """Forward FILE_START / FILE_CHUNK / FILE_END to the FileReceiver (never raises)."""
+        receiver = self._file_receiver
+        if receiver is not None:
+            receiver.handle_packet(packet)
 
     def _record_pong(self) -> None:
         with self._rtt_lock:
