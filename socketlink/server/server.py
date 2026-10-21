@@ -413,12 +413,15 @@ class ChatServer:
             self._start_handler(transport)
 
     def _start_handler(self, transport: Transport) -> None:
-        self._configure_transport(transport)
         handler = ClientHandler(self, transport)
         with self._clients_lock:
             if self._stop_event.is_set():  # stop() already took its snapshot of the handlers
                 transport.close()
                 return
+            # Configured and registered under ONE lock hold: a concurrent
+            # set_network_conditions() either ran before (we read its values) or runs after
+            # (it finds this handler in _handlers), so the new transport can never miss it.
+            self._configure_transport(transport)
             self._handlers.add(handler)
         log.info("Connection from %s:%d", *transport.peer_address)
         handler.start()
@@ -551,19 +554,20 @@ class ChatServer:
         if not 0 <= delay_ms <= MAX_SIMULATED_DELAY_MS:
             raise ValidationError(f"delay_ms must be between 0 and {MAX_SIMULATED_DELAY_MS}.")
         with self._clients_lock:
+            # Applied under the lock (plain setters, no I/O) so two quick calls can never
+            # leave the transports with different values.
             self._loss_rate, self._delay_ms = loss_rate, delay_ms
-            handlers = list(self._handlers)
-        for handler in handlers:
-            handler.transport.set_network_conditions(loss_rate, delay_ms)
+            for handler in self._handlers:
+                handler.transport.set_network_conditions(loss_rate, delay_ms)
         log.info("Network conditions: loss %.0f %%, delay %d ms", loss_rate * 100, delay_ms)
 
     # ---- internals ---------------------------------------------------------
     def _configure_transport(self, transport: Transport) -> None:
-        """Give a new connection the current simulated network and the configured window."""
-        with self._clients_lock:
-            loss_rate, delay_ms = self._loss_rate, self._delay_ms
+        """Give a new connection the current simulated network and the configured window.
+
+        The caller holds `_clients_lock`."""
         try:
-            transport.set_network_conditions(loss_rate, delay_ms)
+            transport.set_network_conditions(self._loss_rate, self._delay_ms)
             if isinstance(transport, ReliableUdpTransport):
                 transport.set_window_size(self.config.window_size)
         except ValidationError as exc:  # a bad config value must not kill the accept thread
