@@ -29,8 +29,13 @@ from typing import Any
 from socketlink.common.config import ServerConfig
 from socketlink.common.constants import (
     CONNECT_TIMEOUT,
+    CONNECTION_TIMEOUT,
     MAX_CHAT_LENGTH,
+    MAX_CONSECUTIVE_MALFORMED,
+    MAX_SIMULATED_DELAY_MS,
+    MAX_SIMULATED_LOSS,
     SOCKET_TIMEOUT,
+    STATS_UPDATE_INTERVAL,
     USERNAME_PATTERN,
     ByeReason,
     DisconnectReason,
@@ -58,15 +63,13 @@ from socketlink.common.protocol import (
     make_user_list,
     make_welcome,
 )
+from socketlink.common.stats import TransportStats
 from socketlink.common.transport import Address, Transport, TransportListener, create_listener
+from socketlink.reliability.reliable_udp import ReliableUdpTransport
 
 log = get_logger(__name__)
 
 _USERNAME_RE = re.compile(USERNAME_PATTERN)
-
-# PROTOCOL.md 7: this many MALFORMED_PACKETs in a row from one client close the connection.
-# TODO: move to constants.py once Sude adds it there (shared file).
-_MAX_CONSECUTIVE_MALFORMED = 5
 
 
 class RegistrationError(ValidationError):
@@ -155,7 +158,7 @@ class ClientHandler(threading.Thread):
                 malformed_in_a_row += 1
                 log.warning("Bad %s payload from %s: %s", packet.type.name, self._label, exc)
                 self._send_error(ErrorCode.MALFORMED_PACKET, str(exc))
-                if malformed_in_a_row >= _MAX_CONSECUTIVE_MALFORMED:
+                if malformed_in_a_row >= MAX_CONSECUTIVE_MALFORMED:
                     log.warning("Closing %s: %d malformed packets in a row", self._label,
                                 malformed_in_a_row)
                     self.disconnect(DisconnectReason.REJECTED)
@@ -328,7 +331,13 @@ class ChatServer:
         self._stop_event = threading.Event()
         self._listener: TransportListener | None = None
         self._accept_thread: threading.Thread | None = None
+        self._watchdog_thread: threading.Thread | None = None
         self._next_client_id = 1
+        # Simulated network (reliable UDP only), applied to every transport, old and new.
+        self._loss_rate = self.config.loss_rate
+        self._delay_ms = self.config.delay_ms
+        # Counters of clients that already left, so the dashboard totals never go down.
+        self._closed_totals = TransportStats().snapshot()
 
     # ---- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -341,11 +350,17 @@ class ChatServer:
         listener.start(self.config.host, self.config.port)  # OSError / NotImplementedError
         host, port = listener.bound_address  # the real port, also when config.port is 0
         self._stop_event.clear()
+        with self._clients_lock:
+            self._closed_totals = TransportStats().snapshot()  # a fresh run starts at zero
         self._listener = listener
         self._accept_thread = threading.Thread(
             target=self._accept_loop, args=(listener,), name="srv-accept", daemon=True
         )
         self._accept_thread.start()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop, name="srv-watchdog", daemon=True
+        )
+        self._watchdog_thread.start()
         log.info("Server listening on %s:%d (%s)", host, port, self.config.mode.value)
         self._publish(
             EventType.SERVER_STARTED, {"host": host, "port": port, "mode": self.config.mode.value}
@@ -357,6 +372,7 @@ class ChatServer:
         with self._clients_lock:
             listener, self._listener = self._listener, None
             accept_thread, self._accept_thread = self._accept_thread, None
+            watchdog_thread, self._watchdog_thread = self._watchdog_thread, None
             handlers = list(self._handlers)
         if listener is None:
             return  # never started, or already stopped
@@ -367,6 +383,8 @@ class ChatServer:
         # stuck thread can never freeze the dashboard.
         if accept_thread is not None:
             accept_thread.join(timeout=CONNECT_TIMEOUT)
+        if watchdog_thread is not None:
+            watchdog_thread.join(timeout=CONNECT_TIMEOUT)
         for handler in handlers:
             handler.join(timeout=CONNECT_TIMEOUT)
         log.info("Server stopped")
@@ -395,6 +413,7 @@ class ChatServer:
             self._start_handler(transport)
 
     def _start_handler(self, transport: Transport) -> None:
+        self._configure_transport(transport)
         handler = ClientHandler(self, transport)
         with self._clients_lock:
             if self._stop_event.is_set():  # stop() already took its snapshot of the handlers
@@ -445,7 +464,9 @@ class ChatServer:
         """Remove `handler`. `reason` must be a DisconnectReason value. Idempotent: the
         CLIENT_LEFT event and the USER_LIST update happen only the first time."""
         with self._clients_lock:
-            self._handlers.discard(handler)
+            if handler in self._handlers:
+                self._handlers.discard(handler)
+                self._add_to_closed_totals(handler.transport.stats.snapshot())
             key = handler.username.lower() if handler.username is not None else None
             was_registered = key is not None and self._clients.get(key) is handler
             if was_registered and key is not None:
@@ -480,17 +501,100 @@ class ChatServer:
         return [handler.info() for handler in handlers]
 
     def kick(self, username: str, reason: str = "kicked_by_admin") -> None:
-        raise NotImplementedError("TODO(Yusuf)")
+        """Send BYE(reason) to `username` and remove it. Unknown users are ignored.
+
+        The work runs in a short-lived thread so a stalled client can never freeze the
+        dashboard thread that called this.
+        """
+        with self._clients_lock:
+            handler = self._clients.get(username.lower())
+        if handler is None:
+            log.info("kick(%s) ignored: not connected", username)
+            return
+        try:
+            bye = ByeReason(reason)
+        except ValueError:
+            bye = ByeReason.KICKED_BY_ADMIN
+        log.info("Kicking %s (%s)", handler.username, bye.value)
+        threading.Thread(
+            target=handler.disconnect,
+            args=(DisconnectReason.from_bye(bye.value),),
+            kwargs={"bye": bye},
+            name=f"srv-kick-{username}",
+            daemon=True,
+        ).start()
 
     def get_stats(self) -> dict[str, int | float]:
-        """Sum of all client transports' stats.snapshot()."""
-        raise NotImplementedError("TODO(Yusuf)")
+        """Sum of all client transports' stats.snapshot(), including clients that left.
+
+        `avg_rtt_ms` is the mean over the connected clients that have a measurement.
+        """
+        with self._clients_lock:
+            handlers = list(self._handlers)
+            totals = dict(self._closed_totals)
+        rtts: list[float] = []
+        for handler in handlers:
+            for name, value in handler.transport.stats.snapshot().items():
+                if name == "avg_rtt_ms":
+                    if value:
+                        rtts.append(float(value))
+                else:
+                    totals[name] = totals[name] + value
+        totals["avg_rtt_ms"] = sum(rtts) / len(rtts) if rtts else 0.0
+        return totals
 
     def set_network_conditions(self, loss_rate: float, delay_ms: int) -> None:
-        """Forward to every transport (UDP only; TCP ignores it)."""
-        raise NotImplementedError("TODO(Yusuf)")
+        """Forward to every transport (UDP only; TCP ignores it). Clients that connect
+        later get the same values. Raises ValidationError outside the GUI slider limits."""
+        if not 0.0 <= loss_rate <= MAX_SIMULATED_LOSS:
+            raise ValidationError(f"loss_rate must be between 0 and {MAX_SIMULATED_LOSS}.")
+        if not 0 <= delay_ms <= MAX_SIMULATED_DELAY_MS:
+            raise ValidationError(f"delay_ms must be between 0 and {MAX_SIMULATED_DELAY_MS}.")
+        with self._clients_lock:
+            self._loss_rate, self._delay_ms = loss_rate, delay_ms
+            handlers = list(self._handlers)
+        for handler in handlers:
+            handler.transport.set_network_conditions(loss_rate, delay_ms)
+        log.info("Network conditions: loss %.0f %%, delay %d ms", loss_rate * 100, delay_ms)
 
     # ---- internals ---------------------------------------------------------
+    def _configure_transport(self, transport: Transport) -> None:
+        """Give a new connection the current simulated network and the configured window."""
+        with self._clients_lock:
+            loss_rate, delay_ms = self._loss_rate, self._delay_ms
+        try:
+            transport.set_network_conditions(loss_rate, delay_ms)
+            if isinstance(transport, ReliableUdpTransport):
+                transport.set_window_size(self.config.window_size)
+        except ValidationError as exc:  # a bad config value must not kill the accept thread
+            log.warning("Transport settings were not applied: %s", exc)
+
+    def _add_to_closed_totals(self, snapshot: dict[str, int | float]) -> None:
+        """Caller holds the lock. The average RTT only makes sense for live clients."""
+        for name, value in snapshot.items():
+            if name != "avg_rtt_ms":
+                self._closed_totals[name] = self._closed_totals[name] + value
+
+    def _watchdog_loop(self) -> None:
+        """srv-watchdog: every STATS_UPDATE_INTERVAL drop silent clients, publish stats."""
+        while not self._stop_event.wait(STATS_UPDATE_INTERVAL):
+            try:
+                self._expire_silent_clients()
+                self._publish(EventType.STATS_UPDATED, {"stats": self.get_stats()})
+            except Exception as exc:  # no exception may escape a network thread
+                log.exception("Watchdog failed")
+                self.report_error(ErrorCode.INTERNAL_ERROR, f"watchdog failed: {exc}")
+
+    def _expire_silent_clients(self) -> None:
+        """Disconnect every connection (HELLO or not) silent for CONNECTION_TIMEOUT."""
+        now = time.time()
+        with self._clients_lock:
+            silent = [h for h in self._handlers if now - h.last_seen > CONNECTION_TIMEOUT]
+        for handler in silent:  # lock released: sending the BYE may be slow
+            log.info("%s was silent for more than %.0f s",
+                     handler.username or handler.transport.peer_address, CONNECTION_TIMEOUT)
+            handler.disconnect(DisconnectReason.TIMEOUT, bye=ByeReason.TIMEOUT)
+
     def report_error(self, code: ErrorCode, message: str) -> None:
         """Publish an ERROR event (shown in the dashboard log)."""
         self._publish(EventType.ERROR, {"code": code.value, "message": message})
