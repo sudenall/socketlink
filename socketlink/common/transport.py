@@ -76,6 +76,10 @@ class Transport(ABC):
         """Configure simulated loss/delay. TCP ignores it (no-op); reliable UDP overrides."""
         return None
 
+    def set_window_size(self, window_size: int) -> None:
+        """Configure the sliding window. TCP ignores it (no-op); reliable UDP overrides."""
+        return None
+
 
 class TransportListener(ABC):
     """Server-side object that produces one Transport per connecting client."""
