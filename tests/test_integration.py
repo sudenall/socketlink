@@ -2,10 +2,6 @@
 
 OWNER: Meryem
 Scenarios: T-04 (broadcast), T-05 (private message). Run in TCP and UDP mode.
-
-Skeleton: while ChatServer / ChatClient are still unimplemented (NotImplementedError)
-every test here is SKIPPED, so the suite stays green. Remove nothing when the real
-code lands; the tests start running by themselves.
 """
 
 from __future__ import annotations
@@ -58,10 +54,7 @@ def connect_peer(running_server: RunningServer) -> Iterator[ConnectPeer]:
             auto_reconnect=False,
         )
         client = ChatClient(bus, config)
-        try:
-            client.connect()
-        except NotImplementedError:
-            pytest.skip("ChatClient.connect() is not implemented yet")
+        client.connect()
         wait_for_event(events, EventType.CONNECTED)
         peer = Peer(username, client, events)
         peers.append(peer)
