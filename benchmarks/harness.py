@@ -122,6 +122,16 @@ class Cluster:
         )
         client.connect()
         wait_for_event(events, EventType.CONNECTED)
+        # The server lists a user only once it can receive messages. Wait until every
+        # earlier client has seen the new user, so a message sent right after this call is
+        # never rejected with UNKNOWN_USER (a GUI user cannot pick a user before the list
+        # shows it either).
+        for other in self.peers:
+            wait_for_event(
+                other.events,
+                EventType.USER_LIST_UPDATED,
+                predicate=lambda e, name=username: name in e.data["users"],
+            )
         peer = Peer(username, client, events)
         self.peers.append(peer)
         return peer
