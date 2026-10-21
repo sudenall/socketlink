@@ -25,6 +25,7 @@ from socketlink.common.exceptions import (
     BadChecksumError,
     MalformedPacketError,
     PayloadTooLargeError,
+    ValidationError,
     VersionMismatchError,
 )
 
@@ -218,3 +219,25 @@ def test_make_bye_accepts_enum_member_and_plain_string(reason: ByeReason) -> Non
 
 def test_client_error_codes_do_not_collide_with_wire_error_codes() -> None:
     assert {c.value for c in ClientErrorCode}.isdisjoint({c.value for c in ErrorCode})
+
+
+def test_transfer_id_packs_client_id_and_counter() -> None:
+    assert p.make_transfer_id(3, 7) == (3 << 16) | 7
+    assert p.transfer_id_client(p.make_transfer_id(3, 7)) == 3
+
+
+def test_transfer_ids_of_different_clients_never_collide() -> None:
+    ids = {p.make_transfer_id(client, counter) for client in range(1, 6) for counter in range(1, 6)}
+    assert len(ids) == 25
+
+
+def test_transfer_id_fits_the_file_chunk_prefix() -> None:
+    tid = p.make_transfer_id(65535, 65535)
+    packet = p.Packet.decode(p.make_file_chunk(tid, 0, b"x").encode())
+    assert p.parse_file_chunk(packet)[0] == tid
+
+
+@pytest.mark.parametrize(("client_id", "counter"), [(0, 1), (65536, 1), (1, 0), (1, 65536)])
+def test_make_transfer_id_rejects_out_of_range_values(client_id: int, counter: int) -> None:
+    with pytest.raises(ValidationError):
+        p.make_transfer_id(client_id, counter)

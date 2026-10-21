@@ -287,6 +287,12 @@ def test_set_network_conditions_is_a_noop_for_tcp(pair) -> None:
     assert client.is_open
 
 
+def test_set_window_size_is_a_noop_for_tcp(pair) -> None:
+    client, _ = pair
+    client.set_window_size(8)
+    assert client.is_open
+
+
 def test_stats_count_packets_and_bytes(pair) -> None:
     client, server_side = pair
     packet = p.make_chat("count me")

@@ -36,6 +36,7 @@ MAX_PAYLOAD_SIZE = 60_000      # bytes; must stay below the UDP datagram limit (
 FILE_CHUNK_SIZE = 1024         # bytes of file data per FILE_CHUNK packet
 FILE_CHUNK_PREFIX_FORMAT = "!II"  # transfer_id, chunk_index
 FILE_CHUNK_PREFIX_SIZE = 8
+TRANSFER_ID_COUNTER_BITS = 16      # transfer_id = (client_id << 16) | counter, see PROTOCOL.md 4.1
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 USERNAME_MIN_LENGTH = 3
