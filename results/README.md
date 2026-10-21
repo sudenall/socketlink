@@ -16,7 +16,7 @@ simulated loss on October 21, 2026, using the pre-PR #30 code at commit
 At that revision, simulated loss was applied only to client-to-server packets; the
 server did not yet apply network conditions to its outgoing packets. For window size 1,
 the retransmission counts are consistent with `200 * p / (1 - p)` under this one-way
-loss model. PR #30 added server-side network-condition handling. Sude is collecting a
+loss model. PR #30 added server-side network-condition handling. Meryem is collecting a
 new sweep with that behavior; replace this CSV when the updated measurements are ready.
 
 | Environment | Value |
