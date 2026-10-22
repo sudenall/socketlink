@@ -36,12 +36,14 @@ MAX_PAYLOAD_SIZE = 60_000      # bytes; must stay below the UDP datagram limit (
 FILE_CHUNK_SIZE = 1024         # bytes of file data per FILE_CHUNK packet
 FILE_CHUNK_PREFIX_FORMAT = "!II"  # transfer_id, chunk_index
 FILE_CHUNK_PREFIX_SIZE = 8
+TRANSFER_ID_COUNTER_BITS = 16      # transfer_id = (client_id << 16) | counter, see PROTOCOL.md 4.1
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 USERNAME_MIN_LENGTH = 3
 USERNAME_MAX_LENGTH = 16
 USERNAME_PATTERN = r"^[A-Za-z0-9_]{3,16}$"
 MAX_CHAT_LENGTH = 2000  # characters
+MAX_CONSECUTIVE_MALFORMED = 5  # MALFORMED_PACKETs in a row before the server closes
 
 # --------------------------------------------------------------------------- #
 # Timing (seconds unless the name says otherwise)

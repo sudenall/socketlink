@@ -1,6 +1,6 @@
 # SocketLink Protokol Spesifikasyonu (v1)
 
-> **Sahibi:** Sude · **Durum:** **Dondurulmuş (v1.0, 2026-10-20)**
+> **Sahibi:** Sude · **Durum:** **Dondurulmuş (v1.0, 2026-10-20; v1.0.2 açıklamalar)**
 >
 > Bu doküman bütün ekibin uyduğu **sözleşmedir**. Server, client, UDP katmanı, dosya transferi ve testler bu dosyaya göre yazılır. Kodda bu dokümanla çelişen bir şey varsa **doküman doğrudur**, kod düzeltilir. Protokolde bir değişiklik gerekiyorsa önce bu dosya PR ile değiştirilir, sonra kod.
 >
@@ -122,7 +122,8 @@ struct.pack("!II", transfer_id, chunk_index) + data      # data <= FILE_CHUNK_SI
 ### 4.1 Kurallar
 - Kullanıcı adı: `^[A-Za-z0-9_]{3,16}$`, büyük/küçük harf duyarsız benzersiz (`Sude` ve `sude` aynı kişi).
 - `text`: boş olamaz, en fazla `MAX_CHAT_LENGTH = 2000` karakter.
-- `transfer_id`: gönderen client tarafından üretilir, o client için benzersiz (1'den başlayan sayaç). Sunucu tarafında `(from, transfer_id)` çifti benzersizdir.
+- `transfer_id`: gönderen client tarafından üretilir ve **sunucu genelinde benzersizdir** (çünkü `FILE_CHUNK` gönderen taşımaz, yalnızca `transfer_id` taşır):
+  `transfer_id = (client_id << 16) | sayaç`. `client_id` WELCOME'dan gelir (1–65535; sunucu bunu aşarsa başa sarar), `sayaç` göndericinin kendi sayacıdır (1–65535). Kodda: `make_transfer_id()` ve `transfer_id_client()` (`protocol.py`).
 - Bilinmeyen JSON alanları **yok sayılır** (ileriye uyumluluk). Eksik zorunlu alan → `MALFORMED_PACKET`.
 
 ## 5. Akışlar (sequence)
@@ -162,6 +163,7 @@ A --- FILE_CHUNK (1..n-1) -------------------------------> S ---> B
 A --- FILE_END ------------------------------------------> S ---> B   B: parça sayısı + CRC32 kontrolü → kaydet
 ```
 - Sunucu dosyayı **saklamaz**, yalnızca iletir (relay). `to` boş olamaz (dosya herkese gönderilmez).
+- **Yönlendirme:** Sunucu `FILE_START`'ta `transfer_id → (gönderen, alıcı)` kaydını tutar; `FILE_CHUNK` ve `FILE_END`'i bu kayda göre alıcıya iletir. `transfer_id`'nin üst 16 biti göndericinin `client_id`'sine eşit değilse paket reddedilir (`ERROR FILE_REJECTED`; başkasının transferini ele geçirmeyi önler). Kayıt `FILE_END`'de, gönderen ya da alıcı ayrılınca silinir. Kayıtsız `transfer_id` için gelen `FILE_CHUNK`/`FILE_END` sessizce atılır.
 - `size > MAX_FILE_SIZE` ise gönderen hiç başlamaz (`ValidationError`).
 - Alıcı dosya adını `Path(filename).name` ile temizler (dizin saldırısı önlemi).
 - CRC uyuşmazlığı veya eksik parça → dosya yazılmaz, `FILE_FAILED`.
@@ -182,6 +184,7 @@ TCP modunda TCP zaten güvenilirlik sağlar; uygulama seviyesinde **ACK kullanı
 - `ACK(ack=n)` gelince `n`'e kadar (dahil) bütün paketler onaylanmış sayılır (cumulative). `base = n + 1`.
 - `RETRANSMIT_TIMEOUT = 0.5 s` dolarsa pencerenin **tamamı** yeniden gönderilir (`flags |= RETRANSMISSION`), `retransmissions` artar, `PACKET_RETRANSMITTED` yayınlanır.
 - Aynı paket için `MAX_RETRIES = 8` aşılırsa → bağlantı kapatılır, `TransportTimeoutError`.
+  - Hata **`send()`** çağrısından `TransportTimeoutError` olarak gelir. Bağlantı kapandığı için **`receive()`** `ConnectionClosedError` fırlatır: `receive()` içindeki `TransportTimeoutError` "süre doldu, döngüye devam" demektir (bkz. §7.1), ölü bir bağlantıda döngüyü bitirmez.
 
 **Alıcı**
 - `expected_seq` 1'den başlar.
@@ -204,7 +207,7 @@ TCP modunda TCP zaten güvenilirlik sağlar; uygulama seviyesinde **ACK kullanı
 | Kod | Ne zaman | Python hatası | Sunucu ne yapar |
 |---|---|---|---|
 | `BAD_CHECKSUM` | Checksum tutmadı | `BadChecksumError` — **TCP transport'u içinde yakalanır**, `receive()` fırlatmaz: paket atılır, `checksum_errors` artar, `PACKET_CORRUPTED` yayınlanır | Paketi atar, bağlantı açık kalır |
-| `MALFORMED_PACKET` | Magic/uzunluk/tip/JSON hatalı | `MalformedPacketError` (`receive()`, `Packet.decode()` veya `json_payload()`) | Hata bildirir; aynı client'tan 5 kez üst üste → kapatır. TCP'de başlık bozuksa akış hizalanamaz, bu yüzden pratikte kapatmak en güvenlisi |
+| `MALFORMED_PACKET` | Magic/uzunluk/tip/JSON hatalı | `MalformedPacketError` (`receive()`, `Packet.decode()` veya `json_payload()`) | Hata bildirir; aynı client'tan `MAX_CONSECUTIVE_MALFORMED` (5) kez üst üste → kapatır. TCP'de başlık bozuksa akış hizalanamaz, bu yüzden pratikte kapatmak en güvenlisi |
 | `VERSION_MISMATCH` | Farklı protokol sürümü | `VersionMismatchError` (`receive()`) | Hata bildirir, kapatır |
 | `NOT_AUTHENTICATED` | HELLO'dan önce başka paket | — | Hata bildirir, kapatır |
 | `INVALID_USERNAME` | Kural dışı kullanıcı adı | — (`ValidationError` yalnızca client tarafındaki girdi kontrolünde) | Hata bildirir, kapatır |
@@ -231,3 +234,5 @@ Bunlar protokol hatası değil, **bağlantı durumudur**; `ERROR` paketine karş
 | v1-draft | 2026-10-19 | Sude | §4: BYE nedenleri için `ByeReason` enum'u (`constants.py`), değerler aynı |
 | v1-draft | 2026-10-19 | Sude | §7: her hata kodu için "Python hatası" sütunu, §7.1 bağlantı durumu hataları eklendi (davranış değişmedi) |
 | v1.0 | 2026-10-20 | Sude | Dondurulmuş. İçerik v1-draft ile aynı; kod ile belge tutarlılığı kontrol edildi (tip numaraları, sabitler, alan adları, hata kodları) |
+| v1.0.1 | 2026-10-20 | Sude | Açıklama eklendi, davranış değişmedi: §6 `MAX_RETRIES` aşımında `send()` / `receive()` hataları, §7 `MAX_CONSECUTIVE_MALFORMED` sabiti |
+| v1.0.2 | 2026-10-21 | Sude | §4.1: `transfer_id` sunucu genelinde benzersiz, `(client_id << 16) \| sayaç`; §5.4: sunucu yönlendirme kuralı. Paket formatı ve alan adları değişmedi |

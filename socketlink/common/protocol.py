@@ -28,6 +28,7 @@ from socketlink.common.constants import (
     MAX_PAYLOAD_SIZE,
     PROTOCOL_MAGIC,
     PROTOCOL_VERSION,
+    TRANSFER_ID_COUNTER_BITS,
     ByeReason,
     MessageType,
     PacketFlag,
@@ -36,6 +37,7 @@ from socketlink.common.exceptions import (
     BadChecksumError,
     MalformedPacketError,
     PayloadTooLargeError,
+    ValidationError,
     VersionMismatchError,
 )
 
@@ -236,3 +238,31 @@ def make_error(code: str, message: str) -> Packet:
 def make_bye(reason: str = ByeReason.CLIENT_QUIT.value) -> Packet:
     """`reason` may be a `ByeReason` member or its string value."""
     return _json_packet(MessageType.BYE, {"reason": str(getattr(reason, "value", reason))})
+
+
+# ---------------------------------------------------------------------- #
+# Transfer ids (docs/PROTOCOL.md 4.1): unique across the whole server, because a FILE_CHUNK
+# carries a transfer_id but no sender.
+# ---------------------------------------------------------------------- #
+_TRANSFER_COUNTER_MASK = (1 << TRANSFER_ID_COUNTER_BITS) - 1
+_MAX_TRANSFER_CLIENT_ID = (1 << (32 - TRANSFER_ID_COUNTER_BITS)) - 1
+
+
+def make_transfer_id(client_id: int, counter: int) -> int:
+    """Build a server-wide unique transfer id: (client_id << 16) | counter.
+
+    `client_id` comes from WELCOME (1..65535); `counter` is the sender's own counter
+    (1..65535). Raises ValidationError when either is out of range.
+    """
+    if not 1 <= client_id <= _MAX_TRANSFER_CLIENT_ID:
+        raise ValidationError(f"client_id must be 1..{_MAX_TRANSFER_CLIENT_ID}, got {client_id}.")
+    if not 1 <= counter <= _TRANSFER_COUNTER_MASK:
+        raise ValidationError(
+            f"transfer counter must be 1..{_TRANSFER_COUNTER_MASK}, got {counter}."
+        )
+    return (client_id << TRANSFER_ID_COUNTER_BITS) | counter
+
+
+def transfer_id_client(transfer_id: int) -> int:
+    """Return the client_id that owns `transfer_id` (its upper 16 bits)."""
+    return transfer_id >> TRANSFER_ID_COUNTER_BITS

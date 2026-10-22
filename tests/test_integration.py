@@ -2,10 +2,6 @@
 
 OWNER: Meryem
 Scenarios: T-04 (broadcast), T-05 (private message). Run in TCP and UDP mode.
-
-Skeleton: while ChatServer / ChatClient are still unimplemented (NotImplementedError)
-every test here is SKIPPED, so the suite stays green. Remove nothing when the real
-code lands; the tests start running by themselves.
 """
 
 from __future__ import annotations
@@ -58,10 +54,7 @@ def connect_peer(running_server: RunningServer) -> Iterator[ConnectPeer]:
             auto_reconnect=False,
         )
         client = ChatClient(bus, config)
-        try:
-            client.connect()
-        except NotImplementedError:
-            pytest.skip("ChatClient.connect() is not implemented yet")
+        client.connect()
         wait_for_event(events, EventType.CONNECTED)
         peer = Peer(username, client, events)
         peers.append(peer)
@@ -81,6 +74,22 @@ def _texts_received(peer: Peer, count: int) -> list[str]:
     ]
 
 
+def _wait_until_listed(*peers: Peer) -> None:
+    """Wait until every peer has seen the full user list.
+
+    The server lists a user only once it can receive messages, and it skips users that are
+    not ready yet when it broadcasts. A message sent right after connect() could otherwise
+    be rejected (UNKNOWN_USER) or silently not delivered.
+    """
+    everyone = {peer.name for peer in peers}
+    for peer in peers:
+        wait_for_event(
+            peer.events,
+            EventType.USER_LIST_UPDATED,
+            predicate=lambda e: set(e.data["users"]) == everyone,
+        )
+
+
 @BOTH_MODES
 def test_three_clients_see_each_other(connect_peer: ConnectPeer) -> None:
     alice, bob, carol = (connect_peer(n) for n in ("alice", "bob", "carol"))
@@ -98,6 +107,7 @@ def test_three_clients_see_each_other(connect_peer: ConnectPeer) -> None:
 def test_broadcast_reaches_everyone_in_order(connect_peer: ConnectPeer) -> None:
     """T-04: all clients receive the same messages in the same order."""
     alice, bob, carol = (connect_peer(n) for n in ("alice", "bob", "carol"))
+    _wait_until_listed(alice, bob, carol)
     sent = [f"message {i}" for i in range(5)]
     for text in sent:
         alice.client.send_chat(text)
@@ -109,6 +119,7 @@ def test_broadcast_reaches_everyone_in_order(connect_peer: ConnectPeer) -> None:
 def test_private_message_reaches_only_the_target(connect_peer: ConnectPeer) -> None:
     """T-05 (first half): only the addressed user receives a private message."""
     alice, bob, carol = (connect_peer(n) for n in ("alice", "bob", "carol"))
+    _wait_until_listed(alice, bob, carol)
     alice.client.send_chat("secret", to="bob")
     event = wait_for_event(bob.events, EventType.MESSAGE_RECEIVED)
     assert event.data["text"] == "secret"
