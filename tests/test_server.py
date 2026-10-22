@@ -695,3 +695,32 @@ def test_client_ids_start_again_at_one_after_65535(env: Env) -> None:
     _, last = join_as(env, "alice")
     _, wrapped = join_as(env, "bob")
     assert (last, wrapped) == (0xFFFF, 1)
+
+
+@pytest.mark.parametrize("how", ["bye", "dropped connection"])
+def test_recipient_is_told_when_the_sender_leaves_mid_transfer(env: Env, how: str) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    transfer_id = make_transfer_id(alice_id, 1)
+    start_transfer(alice, transfer_id, "bob")
+    alice.send(make_file_chunk(transfer_id, 0, b"abc"))
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    assert receive_file_packet(bob).type is MessageType.FILE_CHUNK
+    if how == "bye":
+        alice.send(make_bye(ByeReason.CLIENT_QUIT))
+    else:
+        alice.close()
+    end = receive_file_packet(bob)  # early FILE_END: the recipient gives up the partial file
+    assert end.type is MessageType.FILE_END
+    assert end.json_payload()["transfer_id"] == transfer_id
+    assert env.server._transfers == {}
+
+
+def test_sender_is_not_told_when_the_recipient_leaves_mid_transfer(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    start_transfer(alice, make_transfer_id(alice_id, 1), "bob")
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    bob.send(make_bye(ByeReason.CLIENT_QUIT))
+    wait_for_event(env.events, EventType.CLIENT_LEFT, lambda e: e.data["username"] == "bob")
+    expect_no_file_packet(alice)  # no FILE_* packet goes back to the sender

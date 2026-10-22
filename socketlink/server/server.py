@@ -60,6 +60,7 @@ from socketlink.common.protocol import (
     make_bye,
     make_chat,
     make_error,
+    make_file_end,
     make_file_start,
     make_pong,
     make_user_list,
@@ -541,6 +542,7 @@ class ChatServer:
     def unregister(self, handler: ClientHandler, reason: str) -> None:
         """Remove `handler`. `reason` must be a DisconnectReason value. Idempotent: the
         CLIENT_LEFT event and the USER_LIST update happen only the first time."""
+        orphaned: list[tuple[int, ClientHandler]] = []
         with self._clients_lock:
             if handler in self._handlers:
                 self._handlers.discard(handler)
@@ -548,11 +550,18 @@ class ChatServer:
             for transfer_id in [
                 tid for tid, ends in self._transfers.items() if handler in ends
             ]:
-                del self._transfers[transfer_id]  # the sender or the recipient is gone
+                sender, recipient = self._transfers.pop(transfer_id)  # one of them is gone
+                if sender is handler and recipient is not handler:
+                    orphaned.append((transfer_id, recipient))
             key = handler.username.lower() if handler.username is not None else None
             was_registered = key is not None and self._clients.get(key) is handler
             if was_registered and key is not None:
                 del self._clients[key]
+        # The sender is gone mid-transfer: an early FILE_END makes the recipient drop the partial
+        # file (its FileReceiver reports FILE_FAILED) instead of waiting forever. The lock is
+        # released here, as it must be while sending.
+        for transfer_id, recipient in orphaned:
+            recipient.send(make_file_end(transfer_id))
         if not was_registered:
             return  # never completed HELLO, or already removed
         log.info("%s left (%s)", handler.username, reason)
