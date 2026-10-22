@@ -238,6 +238,18 @@ class FakeServer:
             pass  # receiver already gone
 
 
+# A connect attempt to a closed localhost port fails at once on Linux/macOS, but Windows
+# retries the SYN and reports "refused" only after about 2 s (TcpTransport.connect keeps the
+# real CONNECT_TIMEOUT of transport.py; lowering it would turn "refused" into "timeout").
+# Tests that wait for failed (re)connect attempts therefore allow this much per attempt.
+REFUSED_CONNECT_WORST_CASE = 3.0
+
+
+def failed_attempts_wait(attempts: int) -> float:
+    """Generous wait for `attempts` refused connect attempts plus the event round trip."""
+    return attempts * REFUSED_CONNECT_WORST_CASE + EVENT_TIMEOUT
+
+
 @pytest.fixture(autouse=True)
 def fast_timing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shorten every wait so a full reconnect cycle takes well under a second."""
@@ -358,7 +370,7 @@ def test_connect_to_closed_server_publishes_error(chat_client: ChatClient,
                                                   event_queue: queue.Queue[Event]) -> None:
     """T-08: nobody listening -> ERROR event, back to DISCONNECTED, no crash."""
     chat_client.connect(make_config(free_port()))
-    error = wait_for(event_queue, EventType.ERROR)
+    error = wait_for(event_queue, EventType.ERROR, failed_attempts_wait(1))
     error.validate()
     assert error.data["code"] == ClientErrorCode.CONNECTION_REFUSED
     wait_for_state(event_queue, ConnectionState.DISCONNECTED)
@@ -508,7 +520,8 @@ def test_server_down_goes_reconnecting_then_disconnected(
     connect(chat_client, event_queue, fake.port)
     fake.stop()
     wait_for_state(event_queue, ConnectionState.RECONNECTING)
-    error = wait_for(event_queue, EventType.ERROR)
+    attempts = len(client_module.RECONNECT_DELAYS)
+    error = wait_for(event_queue, EventType.ERROR, failed_attempts_wait(attempts))
     assert "reconnect" in error.data["message"].lower()
     disconnected = wait_for(event_queue, EventType.DISCONNECTED)
     assert disconnected.data["reason"] == DisconnectReason.CONNECTION_LOST
@@ -545,7 +558,8 @@ def test_disconnect_while_reconnecting_stops_retrying(
     fake.stop()
     wait_for_state(event_queue, ConnectionState.RECONNECTING)
     chat_client.disconnect()
-    disconnected = wait_for(event_queue, EventType.DISCONNECTED)
+    # disconnect() may land while an attempt is running; it ends after at most one refusal
+    disconnected = wait_for(event_queue, EventType.DISCONNECTED, failed_attempts_wait(1))
     assert disconnected.data["reason"] == DisconnectReason.USER
     assert chat_client.state is ConnectionState.DISCONNECTED
 
