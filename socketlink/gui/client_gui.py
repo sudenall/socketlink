@@ -313,16 +313,16 @@ class ClientApp:
     def _disconnect_message(reason: object) -> str:
         """Translate existing enum values without inventing new reason codes."""
         messages = {
-            DisconnectReason.USER: "Bağlantı kapatıldı",
-            DisconnectReason.SERVER_SHUTDOWN: "Sunucu kapandı",
-            DisconnectReason.KICKED_BY_ADMIN: "Yönetici tarafından atıldınız",
-            DisconnectReason.TIMEOUT: "Bağlantı zaman aşımına uğradı",
-            DisconnectReason.CONNECTION_LOST: "Bağlantı koptu, yeniden deneniyor",
-            DisconnectReason.REJECTED: "Sunucu bağlantıyı reddetti",
-            DisconnectReason.CONNECT_FAILED: "Sunucuya bağlanılamadı",
-            DisconnectReason.INTERNAL_ERROR: "Beklenmeyen hata",
+            DisconnectReason.USER: "You left",
+            DisconnectReason.SERVER_SHUTDOWN: "You were disconnected (server shutdown)",
+            DisconnectReason.KICKED_BY_ADMIN: "You were kicked by the admin",
+            DisconnectReason.TIMEOUT: "Your connection timed out (no traffic)",
+            DisconnectReason.CONNECTION_LOST: "You lost the connection",
+            DisconnectReason.REJECTED: "Your connection was rejected",
+            DisconnectReason.CONNECT_FAILED: "Could not connect to the server",
+            DisconnectReason.INTERNAL_ERROR: "You left after an internal error",
         }
-        return messages.get(getattr(reason, "value", reason), "Bağlantı sonlandı")
+        return messages.get(getattr(reason, "value", reason), "Connection ended")
 
     @staticmethod
     def _error_message(code: object) -> str:
@@ -334,24 +334,24 @@ class ClientApp:
             try:
                 known = ErrorCode(value)
             except (ValueError, TypeError):
-                return "Beklenmeyen bir hata oluştu"
+                return "An unexpected error occurred"
         messages = {
-            ClientErrorCode.CONNECTION_REFUSED: "Sunucu bağlantıyı kabul etmiyor",
-            ClientErrorCode.CONNECT_TIMEOUT: "Sunucuya bağlantı zaman aşımına uğradı",
-            ClientErrorCode.CONNECTION_LOST: "Sunucuyla bağlantı koptu",
-            ClientErrorCode.PROTOCOL_ERROR: "Sunucudan geçersiz veri alındı",
-            ClientErrorCode.INVALID_STATE: "Bu işlem mevcut bağlantı durumunda kullanılamaz",
-            ErrorCode.BAD_CHECKSUM: "Veri bütünlüğü kontrolü başarısız",
-            ErrorCode.MALFORMED_PACKET: "Geçersiz paket alındı",
-            ErrorCode.VERSION_MISMATCH: "Protokol sürümleri uyumlu değil",
-            ErrorCode.NOT_AUTHENTICATED: "Önce sunucuya bağlanmalısınız",
-            ErrorCode.INVALID_USERNAME: "Kullanıcı adı geçersiz",
-            ErrorCode.USERNAME_TAKEN: "Bu kullanıcı adı zaten kullanılıyor",
-            ErrorCode.UNKNOWN_USER: "Alıcı kullanıcı bulunamadı",
-            ErrorCode.PAYLOAD_TOO_LARGE: "Gönderilecek veri boyut sınırını aşıyor",
-            ErrorCode.SERVER_FULL: "Sunucu dolu",
-            ErrorCode.FILE_REJECTED: "Dosya reddedildi",
-            ErrorCode.INTERNAL_ERROR: "Sunucuda beklenmeyen hata oluştu",
+            ClientErrorCode.CONNECTION_REFUSED: "The server refused the connection",
+            ClientErrorCode.CONNECT_TIMEOUT: "The connection attempt timed out",
+            ClientErrorCode.CONNECTION_LOST: "You lost the connection",
+            ClientErrorCode.PROTOCOL_ERROR: "Received invalid data from the server",
+            ClientErrorCode.INVALID_STATE: "This action is unavailable in the current state",
+            ErrorCode.BAD_CHECKSUM: "Data integrity check failed",
+            ErrorCode.MALFORMED_PACKET: "Received a malformed packet",
+            ErrorCode.VERSION_MISMATCH: "Protocol versions do not match",
+            ErrorCode.NOT_AUTHENTICATED: "Connect to the server first",
+            ErrorCode.INVALID_USERNAME: "Invalid username",
+            ErrorCode.USERNAME_TAKEN: "This username is already in use",
+            ErrorCode.UNKNOWN_USER: "The recipient is not connected",
+            ErrorCode.PAYLOAD_TOO_LARGE: "The data exceeds the size limit",
+            ErrorCode.SERVER_FULL: "The server is full",
+            ErrorCode.FILE_REJECTED: "The file was rejected",
+            ErrorCode.INTERNAL_ERROR: "An unexpected server error occurred",
         }
         return messages[known]
 
@@ -359,20 +359,20 @@ class ClientApp:
     def _file_failure_message(reason: object) -> str:
         """Describe file failures without starting a transfer or adding file controls."""
         messages = {
-            FileFailReason.INVALID_FILE: "Dosya geçersiz",
-            FileFailReason.READ_ERROR: "Dosya okunamadı",
-            FileFailReason.SEND_ERROR: "Dosya gönderilemedi",
-            FileFailReason.CANCELLED: "Dosya aktarımı iptal edildi",
-            FileFailReason.FILE_TOO_LARGE: "Dosya boyut sınırını aşıyor",
-            FileFailReason.BAD_PACKET: "Dosya aktarım paketi geçersiz",
-            FileFailReason.BAD_CHUNK: "Dosya parçası geçersiz",
-            FileFailReason.TRANSFER_ID_CONFLICT: "Dosya aktarım kimliği çakıştı",
-            FileFailReason.MISSING_CHUNKS: "Dosya parçaları eksik",
-            FileFailReason.CHECKSUM_MISMATCH: "Dosya bütünlüğü doğrulanamadı",
-            FileFailReason.WRITE_ERROR: "Dosya kaydedilemedi",
-            FileFailReason.CONNECTION_LOST: "Dosya aktarımı sırasında bağlantı koptu",
+            FileFailReason.INVALID_FILE: "Invalid file",
+            FileFailReason.READ_ERROR: "Could not read the file",
+            FileFailReason.SEND_ERROR: "Could not send the file",
+            FileFailReason.CANCELLED: "File transfer cancelled",
+            FileFailReason.FILE_TOO_LARGE: "The file exceeds the size limit",
+            FileFailReason.BAD_PACKET: "Invalid file transfer packet",
+            FileFailReason.BAD_CHUNK: "Invalid file chunk",
+            FileFailReason.TRANSFER_ID_CONFLICT: "File transfer ID conflict",
+            FileFailReason.MISSING_CHUNKS: "File chunks are missing",
+            FileFailReason.CHECKSUM_MISMATCH: "File integrity check failed",
+            FileFailReason.WRITE_ERROR: "Could not save the file",
+            FileFailReason.CONNECTION_LOST: "Connection lost during file transfer",
         }
-        return messages.get(getattr(reason, "value", reason), "Dosya aktarımı başarısız")
+        return messages.get(getattr(reason, "value", reason), "File transfer failed")
 
     def _build_udp_panel(self) -> None:
         """Build local simulation inputs; no transport is called here."""
@@ -497,9 +497,9 @@ class ClientApp:
             self._append_log(packet_tags[event.type], description, event.timestamp)
             return
         if event.type == EventType.PACKET_CORRUPTED:
-            description = {"checksum": "Paket bütünlüğü kontrolü başarısız",
-                           "malformed": "Bozuk paket alındı"}.get(
-                               data["reason"], "Geçersiz paket alındı")
+            description = {"checksum": "Packet integrity check failed",
+                           "malformed": "Received a malformed packet"}.get(
+                               data["reason"], "Received an invalid packet")
             self._append_log("ERROR", description, event.timestamp)
             return
         if event.type == EventType.ERROR:
