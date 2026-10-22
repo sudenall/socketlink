@@ -337,9 +337,40 @@ def test_welcome_is_the_first_packet_even_during_a_broadcast(
         assert time.monotonic() < deadline, "late was never registered"
         time.sleep(0.01)
     alice.send(make_chat("said while late is joining"))
-    receive_type(alice, MessageType.CHAT)  # the broadcast is done
+    receive_type(alice, MessageType.CHAT)
     assert late.receive(timeout=WAIT).type is MessageType.WELCOME
-    expect_no_chat(late)
+    # late is registered, so it gets the message too, but only after its WELCOME
+    said = receive_type(late, MessageType.CHAT).json_payload()["text"]
+    assert said == "said while late is joining"
+
+
+def test_private_message_during_registration_is_not_lost(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A message sent right after the newcomer is registered must arrive, not UNKNOWN_USER."""
+    alice = env.join("alice")
+    original = server_module.make_welcome
+
+    def slow_welcome(client_id: int, server_name: str, users: list[str]) -> Packet:
+        time.sleep(0.5)  # WELCOME is still on its way, the client is already registered
+        return original(client_id, server_name, users)
+
+    monkeypatch.setattr(server_module, "make_welcome", slow_welcome)
+    late = env.connect()
+    late.send(make_hello("late"))
+    deadline = time.monotonic() + WAIT
+    while "late" not in [c.username for c in env.server.get_clients()]:
+        assert time.monotonic() < deadline, "late was never registered"
+        time.sleep(0.01)
+    alice.send(make_chat("psst", to="late"))
+    assert late.receive(timeout=WAIT).type is MessageType.WELCOME
+    assert receive_type(late, MessageType.CHAT).json_payload()["text"] == "psst"
+    for _ in range(3):  # alice must have gotten her own copy and no UNKNOWN_USER error
+        try:
+            packet = alice.receive(timeout=QUIET)
+        except TransportTimeoutError:
+            break
+        assert packet.type is not MessageType.ERROR
 
 
 def test_five_malformed_packets_in_a_row_close_the_connection(env: Env) -> None:
