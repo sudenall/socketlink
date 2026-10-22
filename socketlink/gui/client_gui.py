@@ -23,19 +23,23 @@ from __future__ import annotations
 
 import argparse
 import queue
+import threading
 import time
 import tkinter as tk
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from tkinter import ttk
 
+from socketlink.client.client import ChatClient
 from socketlink.common.config import ClientConfig
 from socketlink.common.constants import (
     APP_NAME,
+    CONNECT_TIMEOUT,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_WINDOW_SIZE,
     GUI_POLL_INTERVAL_MS,
+    MAX_CHAT_LENGTH,
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,
     MAX_WINDOW_SIZE,
@@ -48,9 +52,12 @@ from socketlink.common.constants import (
     TransportMode,
 )
 from socketlink.common.events import Event, EventBus, EventType
-from socketlink.common.exceptions import ValidationError
+from socketlink.common.exceptions import InvalidStateError, ValidationError
+from socketlink.common.logger import get_logger
 from socketlink.common.stats import TransportStats
 from socketlink.gui import theme
+
+log = get_logger(__name__)
 
 
 class ClientApp:
@@ -60,9 +67,16 @@ class ClientApp:
         self.events = self.event_bus.subscribe_queue()
         self._poll_after_id: str | None = None
         self.demo: DemoClient | None = None
+        self.client = ChatClient(self.event_bus)
+        self._connection_state = ConnectionState.DISCONNECTED
+        self._send_thread: threading.Thread | None = None
+        self._disconnect_thread: threading.Thread | None = None
+        self._action_errors: queue.Queue[Exception] = queue.Queue()
+        self._closing = False
+        self._close_after_id: str | None = None
 
     def build_ui(self) -> None:
-        """Build the connection form without enabling network operations."""
+        """Build the panels and connect user actions to the client core."""
         self.root.title(f"{APP_NAME} - Client")
         self.root.geometry(theme.CLIENT_WINDOW_SIZE)
         self.root.configure(bg=theme.COLOR_BG)
@@ -92,6 +106,7 @@ class ClientApp:
         self.username_var = tk.StringVar(master=self.root)
         self.mode_var = tk.StringVar(master=self.root, value=TransportMode.TCP.value)
 
+        self.config_entries: list[tk.Entry] = []
         for row, (label, variable) in enumerate((
             ("Host", self.host_var),
             ("Port", self.port_var),
@@ -105,15 +120,17 @@ class ClientApp:
                 fg=theme.COLOR_TEXT,
             ).grid(row=row, column=0, sticky="w", padx=theme.PAD_SMALL,
                    pady=theme.PAD_SMALL)
-            tk.Entry(
+            entry = tk.Entry(
                 self.connection_panel,
                 textvariable=variable,
                 font=theme.FONT_NORMAL,
                 bg=theme.COLOR_PANEL,
                 fg=theme.COLOR_TEXT,
                 insertbackground=theme.COLOR_TEXT,
-            ).grid(row=row, column=1, sticky="ew", padx=theme.PAD_SMALL,
-                   pady=theme.PAD_SMALL)
+            )
+            entry.grid(row=row, column=1, sticky="ew", padx=theme.PAD_SMALL,
+                       pady=theme.PAD_SMALL)
+            self.config_entries.append(entry)
 
         mode_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
         mode_panel.grid(row=3, column=1, sticky="w", pady=theme.PAD_SMALL)
@@ -142,13 +159,13 @@ class ClientApp:
         button_panel = tk.Frame(self.connection_panel, bg=theme.COLOR_PANEL)
         button_panel.grid(row=4, column=1, sticky="w", pady=theme.PAD_SMALL)
         self.connect_button = tk.Button(
-            button_panel, text="Connect", state=tk.DISABLED,
+            button_panel, text="Connect", command=self._on_connect,
             font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
             disabledforeground=theme.COLOR_MUTED,
         )
         self.connect_button.pack(side="left", padx=theme.PAD_SMALL)
         self.disconnect_button = tk.Button(
-            button_panel, text="Disconnect", state=tk.DISABLED,
+            button_panel, text="Disconnect", state=tk.DISABLED, command=self._on_disconnect,
             font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
             disabledforeground=theme.COLOR_MUTED,
         )
@@ -224,8 +241,9 @@ class ClientApp:
         )
         self.message_entry.grid(row=1, column=0, sticky="ew",
                                 padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self.message_entry.bind("<Return>", self._on_send)
         self.send_button = tk.Button(
-            self.chat_panel, text="Send", state=tk.DISABLED,
+            self.chat_panel, text="Send", state=tk.DISABLED, command=self._on_send,
             font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
             disabledforeground=theme.COLOR_MUTED,
         )
@@ -233,7 +251,99 @@ class ClientApp:
                               padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
         self._build_udp_panel()
         self._build_monitor_panels()
+        self._refresh_controls()
         self._poll_events()
+
+    def _on_connect(self) -> None:
+        """Validate local input; ChatClient.connect starts its own network worker."""
+        if self._closing or self.demo is not None or self.connect_button["state"] == tk.DISABLED:
+            return
+        try:
+            config = self._build_client_config()
+            self.client.connect(config)
+        except (ValidationError, InvalidStateError) as exc:
+            self._report_action_error(exc)
+            return
+        self.notice_label.configure(text="")
+        self._connection_state = self.client.state
+        self._refresh_controls()
+
+    def _on_disconnect(self) -> None:
+        """Disconnect outside Tk: BYE and transport shutdown may block."""
+        if self.demo is not None:
+            return
+        if self._disconnect_thread is None or not self._disconnect_thread.is_alive():
+            self._disconnect_thread = threading.Thread(
+                target=self._run_client_action, args=(self.client.disconnect,),
+                name="gui-client-disconnect", daemon=True,
+            )
+            self._disconnect_thread.start()
+        self._refresh_controls()
+
+    def _on_send(self, _event: tk.Event | None = None) -> str:
+        """Capture the draft and recipient on Tk, then send in a worker thread."""
+        if self.send_button["state"] == tk.DISABLED or self._closing or self.demo is not None:
+            return "break"
+        text = self.message_var.get()
+        if not text.strip() or len(text) > MAX_CHAT_LENGTH:
+            self._report_action_error(ValidationError(
+                f"Enter a non-empty message of at most {MAX_CHAT_LENGTH} characters."
+            ))
+            return "break"
+        selection = self.user_list.curselection()
+        # Row zero represents broadcast; a real user named Everyone remains selectable.
+        recipient = self.user_list.get(selection[0]) if selection and selection[0] else None
+        self._send_thread = threading.Thread(
+            target=self._run_client_action,
+            args=(lambda: self.client.send_chat(text, recipient),),
+            name="gui-client-send", daemon=True,
+        )
+        self._send_thread.start()
+        self._refresh_controls()
+        return "break"
+
+    def _run_client_action(self, action: Callable[[], None]) -> None:
+        """Workers never touch Tk; local exceptions return through a private queue."""
+        try:
+            action()
+        except Exception as exc:  # noqa: BLE001 - keep worker failures visible on the GUI
+            log.exception("Client GUI action failed")
+            self._action_errors.put(exc)
+
+    def _report_action_error(self, exc: Exception) -> None:
+        """Show a local action failure without introducing new event error codes."""
+        if isinstance(exc, ValidationError):
+            message = str(exc)
+        elif isinstance(exc, InvalidStateError):
+            message = self._error_message(ClientErrorCode.INVALID_STATE)
+        else:
+            message = self._error_message(ErrorCode.INTERNAL_ERROR)
+        self.notice_label.configure(text=message, fg=theme.COLOR_DISCONNECTED)
+        self._append_log("ERROR", message, time.time())
+
+    def _refresh_controls(self) -> None:
+        """Enable only actions valid for the last connection state and active workers."""
+        sending = self._send_thread is not None and self._send_thread.is_alive()
+        stopping = self._disconnect_thread is not None and self._disconnect_thread.is_alive()
+        real = self.demo is None and not self._closing
+        idle = self._connection_state == ConnectionState.DISCONNECTED
+        connected = self._connection_state == ConnectionState.CONNECTED
+        self.connect_button.configure(state=tk.NORMAL if real and idle
+                                      and not sending and not stopping else tk.DISABLED)
+        self.disconnect_button.configure(state=tk.NORMAL if real and not stopping
+                                         and self._connection_state in (
+                                             ConnectionState.CONNECTING, ConnectionState.CONNECTED,
+                                             ConnectionState.RECONNECTING,
+                                         ) else tk.DISABLED)
+        self.send_button.configure(state=tk.NORMAL if real and connected
+                                   and not sending and not stopping else tk.DISABLED)
+        self.message_entry.configure(state=tk.NORMAL if real and connected
+                                     and not stopping else tk.DISABLED)
+        for entry in self.config_entries:
+            entry.configure(state=tk.NORMAL if real and idle else tk.DISABLED)
+        for button in self.mode_buttons.values():
+            button.state(["!disabled"] if real and idle else ["disabled"])
+        self._update_udp_controls()
 
     def _build_monitor_panels(self) -> None:
         """Build event-driven statistics and a bounded, read-only live log."""
@@ -422,8 +532,11 @@ class ClientApp:
         self._update_udp_controls()
 
     def _update_udp_controls(self, *_args: str) -> None:
-        """Enable simulation inputs only while UDP is selected."""
-        state = tk.NORMAL if self.mode_var.get() == TransportMode.UDP.value else tk.DISABLED
+        """Simulation settings are captured on connect; lock them during a session."""
+        enabled = (self.mode_var.get() == TransportMode.UDP.value and not self._closing
+                   and (self.demo is not None
+                        or self._connection_state == ConnectionState.DISCONNECTED))
+        state = tk.NORMAL if enabled else tk.DISABLED
         for control in self.udp_controls:
             control.configure(state=state)
 
@@ -464,17 +577,32 @@ class ClientApp:
     def _poll_events(self) -> None:
         """Drain self.events without blocking (get_nowait loop), call _handle_event,
         then reschedule with root.after(GUI_POLL_INTERVAL_MS, self._poll_events)."""
-        try:
-            while True:
+        while True:
+            try:
                 event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            try:
                 self._handle_event(event)
-        except queue.Empty:
-            pass
+            except Exception:  # noqa: BLE001 - one bad event must not stop queue polling
+                log.exception("Could not show %s event", event.type.value)
+        while True:
+            try:
+                exc = self._action_errors.get_nowait()
+            except queue.Empty:
+                break
+            self._report_action_error(exc)
+        self._refresh_controls()
         self._poll_after_id = self.root.after(GUI_POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, event: Event) -> None:
         """Render queued chat, user-list and connection events on the Tk thread."""
         data = event.data
+        if event.type == EventType.MESSAGE_SENT:
+            # Acceptance is not delivery: only the server echo is added to history.
+            if self.message_var.get() == data["text"]:
+                self.message_var.set("")
+            return
         if event.type == EventType.STATS_UPDATED:
             for key, label in self.stat_labels.items():
                 value = data["stats"].get(key)
@@ -522,11 +650,12 @@ class ClientApp:
             return
         if event.type == EventType.USER_LIST_UPDATED:
             selection = self.user_list.curselection()
-            selected = self.user_list.get(selection[0]) if selection else "Everyone"
+            selected = self.user_list.get(selection[0]) if selection and selection[0] else None
             users = ["Everyone", *event.data["users"]]
             self.user_list.delete(0, tk.END)
             self.user_list.insert(tk.END, *users)
-            self.user_list.selection_set(users.index(selected) if selected in users else 0)
+            kept = users[1:].index(selected) + 1 if selected in users[1:] else 0
+            self.user_list.selection_set(kept)
             return
         if event.type == EventType.STATE_CHANGED:
             state = ConnectionState(event.data["new"])
@@ -535,7 +664,15 @@ class ClientApp:
             self.notice_label.configure(text="")
         elif event.type == EventType.DISCONNECTED:
             state = ConnectionState.DISCONNECTED
-            self._show_notice(self._disconnect_message(data["reason"]), "WARNING", event)
+            message = self._disconnect_message(data["reason"])
+            if data["reason"] in (DisconnectReason.REJECTED, DisconnectReason.CONNECT_FAILED):
+                detail = self.notice_label["text"]
+                if detail:
+                    message += f": {detail}"
+            self._show_notice(message, "WARNING", event)
+            self.user_list.delete(0, tk.END)
+            self.user_list.insert(tk.END, "Everyone")
+            self.user_list.selection_set(0)
         else:
             # Other event types will be handled when their panels are implemented.
             return
@@ -548,14 +685,38 @@ class ClientApp:
             ConnectionState.DISCONNECTING: theme.COLOR_CONNECTING,
         }
         self.status_label.configure(text=state.value.capitalize(), fg=colors[state])
+        self._connection_state = state
+        self._refresh_controls()
 
     def on_close(self) -> None:
-        """Disconnect cleanly, then root.destroy()."""
+        """Keep Tk responsive while the client cancels or closes its connection."""
+        if self._closing:
+            return
+        self._closing = True
         if self.demo is not None:
             self.demo.stop()
+        else:
+            self._on_disconnect()
+        self._refresh_controls()
+        self._close_when_disconnected(time.monotonic() + CONNECT_TIMEOUT)
+
+    def _close_when_disconnected(self, deadline: float) -> None:
+        """Wait without joining on Tk; core daemon workers own their transport cleanup."""
+        workers = (self._send_thread, self._disconnect_thread)
+        waiting = (self.client.state != ConnectionState.DISCONNECTED
+                   or any(worker is not None and worker.is_alive() for worker in workers))
+        if waiting and time.monotonic() < deadline:
+            self._close_after_id = self.root.after(
+                GUI_POLL_INTERVAL_MS, self._close_when_disconnected, deadline,
+            )
+            return
+        if waiting:
+            log.warning("GUI closed while client shutdown is still finishing")
+        self._close_after_id = None
         if self._poll_after_id is not None:
             self.root.after_cancel(self._poll_after_id)
             self._poll_after_id = None
+        self.event_bus.unsubscribe(None, self.events.put)
         self.root.destroy()
 
 
@@ -653,5 +814,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         app.mode_var.set(TransportMode.UDP.value)
         app.demo = DemoClient(root, app.event_bus, app._build_client_config())
         app.demo.start()
+        app._refresh_controls()
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
