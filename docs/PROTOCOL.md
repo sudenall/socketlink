@@ -1,6 +1,6 @@
 # SocketLink Protokol Spesifikasyonu (v1)
 
-> **Sahibi:** Sude · **Durum:** **Dondurulmuş (v1.0, 2026-10-20; v1.0.2 açıklamalar)**
+> **Sahibi:** Sude · **Durum:** **Dondurulmuş (v1.0, 2026-10-20; v1.1 geriye uyumlu ek alan)**
 >
 > Bu doküman bütün ekibin uyduğu **sözleşmedir**. Server, client, UDP katmanı, dosya transferi ve testler bu dosyaya göre yazılır. Kodda bu dokümanla çelişen bir şey varsa **doküman doğrudur**, kod düzeltilir. Protokolde bir değişiklik gerekiyorsa önce bu dosya PR ile değiştirilir, sonra kod.
 >
@@ -108,6 +108,8 @@ Alan isimleri **snake_case** ve tam olarak aşağıdaki gibidir. `timestamp` her
 
 // ERROR (S→C)
 { "code": "USERNAME_TAKEN", "message": "Username 'sude' is already in use." }
+// Dosya transferiyle ilgili hatalarda opsiyonel "transfer_id" taşır (v1.1):
+{ "code": "UNKNOWN_USER", "message": "The recipient left.", "transfer_id": 131073 }
 
 // BYE (↔)
 { "reason": "client_quit" }    // client_quit | server_shutdown | kicked_by_admin | timeout (kodda: ByeReason)
@@ -164,6 +166,8 @@ A --- FILE_END ------------------------------------------> S ---> B   B: parça 
 ```
 - Sunucu dosyayı **saklamaz**, yalnızca iletir (relay). `to` boş olamaz (dosya herkese gönderilmez).
 - **Yönlendirme:** Sunucu `FILE_START`'ta `transfer_id → (gönderen, alıcı)` kaydını tutar; `FILE_CHUNK` ve `FILE_END`'i bu kayda göre alıcıya iletir. `transfer_id`'nin üst 16 biti göndericinin `client_id`'sine eşit değilse paket reddedilir (`ERROR FILE_REJECTED`; başkasının transferini ele geçirmeyi önler). Kayıt `FILE_END`'de, gönderen ya da alıcı ayrılınca silinir. Kayıtsız `transfer_id` için gelen `FILE_CHUNK`/`FILE_END` sessizce atılır.
+- **Gönderen ayrılırsa (v1.1):** Transfer ortasında gönderenin bağlantısı koparsa ya da gönderen BYE yollarsa sunucu alıcıya, gönderen adına **erken bir `FILE_END`** yollar. Alıcının `FileReceiver`'ı parça sayısı tutmadığı için transferi `FILE_FAILED (missing_chunks)` ile bitirir ve `.part` dosyasını siler; sunucu aksi hâlde alıcıyı sonsuza kadar bekletirdi.
+- **Alıcı ayrılırsa (v1.1):** Sunucu, kaydı olan her gönderene **bir kez** `ERROR {code: UNKNOWN_USER, transfer_id}` yollar. İstemci o yüklemeyi durdurur ve `FILE_FAILED (recipient_left)` yayınlar; böylece gönderen, sunucunun kalan parçaları sessizce attığı bir transferi "tamamlandı" sanmaz.
 - `size > MAX_FILE_SIZE` ise gönderen hiç başlamaz (`ValidationError`).
 - Alıcı dosya adını `Path(filename).name` ile temizler (dizin saldırısı önlemi).
 - CRC uyuşmazlığı veya eksik parça → dosya yazılmaz, `FILE_FAILED`.
@@ -236,3 +240,4 @@ Bunlar protokol hatası değil, **bağlantı durumudur**; `ERROR` paketine karş
 | v1.0 | 2026-10-20 | Sude | Dondurulmuş. İçerik v1-draft ile aynı; kod ile belge tutarlılığı kontrol edildi (tip numaraları, sabitler, alan adları, hata kodları) |
 | v1.0.1 | 2026-10-20 | Sude | Açıklama eklendi, davranış değişmedi: §6 `MAX_RETRIES` aşımında `send()` / `receive()` hataları, §7 `MAX_CONSECUTIVE_MALFORMED` sabiti |
 | v1.0.2 | 2026-10-21 | Sude | §4.1: `transfer_id` sunucu genelinde benzersiz, `(client_id << 16) \| sayaç`; §5.4: sunucu yönlendirme kuralı. Paket formatı ve alan adları değişmedi |
+| v1.1 | 2026-10-23 | Sude | Geriye uyumlu ek (paket formatı aynı; eski alıcılar yeni alanı yok sayar, §4.1): `ERROR` payload'ına opsiyonel `transfer_id`; §5.4: gönderen ayrılınca alıcıya erken `FILE_END`, alıcı ayrılınca göndericiye `ERROR UNKNOWN_USER + transfer_id`. Yusuf'un #44 review'ünde Hamit'in bulduğu iki boşluk |

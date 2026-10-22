@@ -55,7 +55,7 @@ def test_all_vocabulary_enums_use_unique_values() -> None:
 
 def test_file_fail_reason_values_are_the_documented_set() -> None:
     assert {r.value for r in FileFailReason} == {
-        "invalid_file", "read_error", "send_error", "cancelled",
+        "invalid_file", "read_error", "send_error", "cancelled", "recipient_left",
         "file_too_large", "bad_packet", "bad_chunk", "transfer_id_conflict",
         "missing_chunks", "checksum_mismatch", "write_error", "connection_lost",
     }

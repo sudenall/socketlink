@@ -216,7 +216,7 @@ Alınan BYE'ı çevirmek için `DisconnectReason.from_bye(reason)` kullanılır.
 #### `FILE_FAILED` reason değerleri (`FileFailReason`)
 | Yön | Değerler |
 |---|---|
-| upload (`FileSender`) | `invalid_file`, `read_error`, `send_error`, `cancelled` |
+| upload (`FileSender`) | `invalid_file`, `read_error`, `send_error`, `cancelled`, `recipient_left` |
 | download (`FileReceiver`) | `file_too_large`, `bad_packet`, `bad_chunk`, `transfer_id_conflict`, `missing_chunks`, `checksum_mismatch`, `write_error`, `connection_lost` |
 
 `PACKET_CORRUPTED` olayının `reason` alanı `"checksum"` (CRC uyuşmadı) veya `"malformed"` (başlık geçersiz) olur.

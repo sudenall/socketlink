@@ -241,3 +241,17 @@ def test_transfer_id_fits_the_file_chunk_prefix() -> None:
 def test_make_transfer_id_rejects_out_of_range_values(client_id: int, counter: int) -> None:
     with pytest.raises(ValidationError):
         p.make_transfer_id(client_id, counter)
+
+
+def test_make_error_without_transfer_id_keeps_the_old_payload() -> None:
+    assert p.make_error("USERNAME_TAKEN", "taken").json_payload() == {
+        "code": "USERNAME_TAKEN", "message": "taken",
+    }
+
+
+def test_make_error_carries_the_transfer_id_when_given() -> None:
+    tid = p.make_transfer_id(2, 1)
+    fields = p.Packet.decode(p.make_error("UNKNOWN_USER", "gone", transfer_id=tid).encode()
+                             ).json_payload()
+    assert fields == {"code": "UNKNOWN_USER", "message": "gone", "transfer_id": tid}
+
