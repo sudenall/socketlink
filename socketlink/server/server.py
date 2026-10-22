@@ -117,8 +117,11 @@ class ClientHandler(threading.Thread):
         self._transport_closed = False  # the socket itself was closed (after the BYE drain)
         self._bye_sent = False
         self._disconnect_done = threading.Event()  # BYE attempted and client unregistered
-        # True once WELCOME went out. Until then broadcasts skip this client, so that WELCOME
-        # is always its first packet (PROTOCOL.md 5.1).
+        # Held by register() from before the client becomes visible until its WELCOME is sent,
+        # and by every send(). Other threads can already route to a registered client, but
+        # their packets wait here, so WELCOME is always its first packet (PROTOCOL.md 5.1).
+        self.send_lock = threading.RLock()
+        # True once the client is registered, i.e. broadcasts and private messages reach it.
         self.ready = False
 
     # ---- thread body -----------------------------------------------------
@@ -174,7 +177,8 @@ class ClientHandler(threading.Thread):
         if self._is_closed:
             return
         try:
-            self.transport.send(packet)
+            with self.send_lock:
+                self.transport.send(packet)
         except TransportError as exc:
             # Includes ConnectionClosedError and, on reliable UDP, MAX_RETRIES exceeded.
             log.info("Sending %s to %s failed: %s", packet.type.name, self._label, exc)
@@ -441,30 +445,33 @@ class ChatServer:
                 f"Username must match {USERNAME_PATTERN} (3-16 letters, digits or _).",
             )
         key = username.lower()
-        with self._clients_lock:
-            if self._stop_event.is_set():
-                raise ConnectionClosedError("The server is stopping.")
-            if len(self._clients) >= self.config.max_clients:
-                raise RegistrationError(ErrorCode.SERVER_FULL, "The server is full.")
-            if key in self._clients:
-                raise RegistrationError(
-                    ErrorCode.USERNAME_TAKEN, f"Username '{username}' is already in use."
-                )
-            handler.username = username
-            self._clients[key] = handler
-            client_id = self._next_client_id
-            self._next_client_id += 1
-            users = self._user_names_locked()
-        handler.name = f"srv-client-{username}"
-        log.info("%s joined (client_id=%d)", username, client_id)
-        # CLIENT_JOINED goes first so that a client that vanishes right away still produces
-        # a matching CLIENT_LEFT afterwards.
-        self._publish(
-            EventType.CLIENT_JOINED,
-            {"username": username, "address": handler.transport.peer_address},
-        )
-        handler.send(make_welcome(client_id, self.config.server_name, users))
-        handler.ready = True  # from now on broadcasts reach this client, after its WELCOME
+        # send_lock first: once the client is in _clients other threads may route to it, and
+        # their packets must not overtake the WELCOME. Lock order: send_lock, then _clients_lock.
+        with handler.send_lock:
+            with self._clients_lock:
+                if self._stop_event.is_set():
+                    raise ConnectionClosedError("The server is stopping.")
+                if len(self._clients) >= self.config.max_clients:
+                    raise RegistrationError(ErrorCode.SERVER_FULL, "The server is full.")
+                if key in self._clients:
+                    raise RegistrationError(
+                        ErrorCode.USERNAME_TAKEN, f"Username '{username}' is already in use."
+                    )
+                handler.username = username
+                self._clients[key] = handler
+                handler.ready = True  # private messages and broadcasts reach it from now on
+                client_id = self._next_client_id
+                self._next_client_id += 1
+                users = self._user_names_locked()
+            handler.name = f"srv-client-{username}"
+            log.info("%s joined (client_id=%d)", username, client_id)
+            # CLIENT_JOINED goes first so that a client that vanishes right away still produces
+            # a matching CLIENT_LEFT afterwards.
+            self._publish(
+                EventType.CLIENT_JOINED,
+                {"username": username, "address": handler.transport.peer_address},
+            )
+            handler.send(make_welcome(client_id, self.config.server_name, users))
         self._broadcast_user_list()
 
     def unregister(self, handler: ClientHandler, reason: str) -> None:
