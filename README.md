@@ -765,7 +765,7 @@ Ders politikasını Yiğit hocaya teyit eder ve `#duyurular`'a yazar. Her durumd
 
 | Ne | Link |
 |---|---|
-| Rapor (Google Docs) | [SocketLink Term Project Report](https://docs.google.com/document/d/1WEDgNW-Wha5UN6IBW8hMIwwDGNmPCE1B/edit?usp=sharing&ouid=117120940580869238124&rtpof=true&sd=true) |
+| Rapor (Google Docs) | [SocketLink Term Project Report](https://docs.google.com/document/d/1wd1newheEFvANm-GyKPN9Pb-sMJZo_Qi8YARcAztn_4/edit?usp=sharing) |
 | Durum tablosu (Google Sheets) | _Nevin ekleyecek_ |
 | Kaynak tablosu (Google Sheets) | _Nevin ekleyecek_ |
 | GitHub Projects panosu | _Sude ekleyecek_ |

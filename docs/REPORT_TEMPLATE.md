@@ -2,7 +2,7 @@
 
 > **Owner:** Nevin Malkoç (Report Coordinator & Editor)  
 > **Target Document:** Google Docs (Single unified document)  
-> **Format Rules:** Times New Roman, 12 pt, 1.5 line spacing, 1-inch margins, IEEE referencing style.
+> **Format Rules:** Times New Roman, 12 pt (headings: 14 pt bold uppercase), 1.5 line spacing, margins: Left 4 cm, Right 1.5 cm, Top/Bottom 2.5 cm, justified alignment, IEEE referencing style (README §12).
 
 ---
 
