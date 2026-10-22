@@ -17,7 +17,13 @@ import pytest
 
 import socketlink.server.server as server_module
 from socketlink.common.config import ServerConfig
-from socketlink.common.constants import DisconnectReason, ErrorCode, MessageType, TransportMode
+from socketlink.common.constants import (
+    ByeReason,
+    DisconnectReason,
+    ErrorCode,
+    MessageType,
+    TransportMode,
+)
 from socketlink.common.events import Event, EventBus, EventType
 from socketlink.common.exceptions import (
     ConnectionClosedError,
@@ -28,8 +34,13 @@ from socketlink.common.protocol import (
     Packet,
     make_bye,
     make_chat,
+    make_file_chunk,
+    make_file_end,
+    make_file_start,
     make_hello,
     make_ping,
+    make_transfer_id,
+    parse_file_chunk,
 )
 from socketlink.common.transport import TcpTransport, Transport
 from socketlink.reliability.reliable_udp import ReliableUdpTransport
@@ -495,3 +506,192 @@ def test_udp_transports_get_network_conditions_and_window_size() -> None:
         for client in clients:
             client.close()
         environment.server.stop()
+
+
+# ---- file relay (PROTOCOL.md 5.4) ----------------------------------------------------------
+FILE_TYPES = (MessageType.FILE_START, MessageType.FILE_CHUNK, MessageType.FILE_END)
+
+
+def join_as(env: Env, username: str) -> tuple[TcpTransport, int]:
+    """Like env.join, but also return the client_id from the WELCOME."""
+    transport = env.connect()
+    transport.send(make_hello(username))
+    welcome = receive_type(transport, MessageType.WELCOME)
+    return transport, welcome.json_payload()["client_id"]
+
+
+def receive_file_packet(transport: Transport) -> Packet:
+    """Next FILE_* packet; other packets (USER_LIST updates...) are skipped."""
+    deadline = time.monotonic() + WAIT
+    while True:
+        packet = transport.receive(timeout=max(deadline - time.monotonic(), 0.01))
+        if packet.type in FILE_TYPES:
+            return packet
+
+
+def expect_no_file_packet(transport: Transport) -> None:
+    deadline = time.monotonic() + QUIET
+    while True:
+        try:
+            packet = transport.receive(timeout=max(deadline - time.monotonic(), 0.01))
+        except TransportTimeoutError:
+            return
+        assert packet.type not in FILE_TYPES
+
+
+def error_code(transport: Transport) -> str:
+    return receive_type(transport, MessageType.ERROR).json_payload()["code"]
+
+
+def start_transfer(sender: Transport, transfer_id: int, to: str | None) -> None:
+    sender.send(make_file_start(transfer_id, "a.txt", 3, 1, 0, to=to))
+
+
+def test_file_is_relayed_to_the_recipient_with_the_sender_added(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    carol, _ = join_as(env, "carol")
+    transfer_id = make_transfer_id(alice_id, 1)
+    start_transfer(alice, transfer_id, "bob")
+    alice.send(make_file_chunk(transfer_id, 0, b"abc"))
+    alice.send(make_file_end(transfer_id))
+    start = receive_file_packet(bob)
+    assert start.type is MessageType.FILE_START
+    fields = start.json_payload()
+    assert (fields["from"], fields["to"], fields["transfer_id"]) == ("alice", "bob", transfer_id)
+    assert (fields["filename"], fields["size"], fields["total_chunks"]) == ("a.txt", 3, 1)
+    chunk = receive_file_packet(bob)
+    assert parse_file_chunk(chunk) == (transfer_id, 0, b"abc")
+    end = receive_file_packet(bob)
+    assert end.type is MessageType.FILE_END
+    assert end.json_payload()["transfer_id"] == transfer_id
+    expect_no_file_packet(carol)  # the server relays to the recipient only
+    expect_no_file_packet(alice)
+
+
+def test_two_senders_to_the_same_recipient_do_not_mix(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    carol, carol_id = join_as(env, "carol")
+    bob, _ = join_as(env, "bob")
+    first, second = make_transfer_id(alice_id, 1), make_transfer_id(carol_id, 1)
+    start_transfer(alice, first, "bob")
+    start_transfer(carol, second, "bob")
+    alice.send(make_file_chunk(first, 0, b"from alice"))
+    carol.send(make_file_chunk(second, 0, b"from carol"))
+    alice.send(make_file_end(first))
+    carol.send(make_file_end(second))
+    chunks: dict[int, bytes] = {}
+    ends: set[int] = set()
+    starters: dict[int, str] = {}
+    for _ in range(6):
+        packet = receive_file_packet(bob)
+        if packet.type is MessageType.FILE_START:
+            fields = packet.json_payload()
+            starters[fields["transfer_id"]] = fields["from"]
+        elif packet.type is MessageType.FILE_CHUNK:
+            tid, _index, data = parse_file_chunk(packet)
+            chunks[tid] = data
+        else:
+            ends.add(packet.json_payload()["transfer_id"])
+    assert starters == {first: "alice", second: "carol"}
+    assert chunks == {first: b"from alice", second: b"from carol"}
+    assert ends == {first, second}
+
+
+def test_file_start_without_a_recipient_is_rejected(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    start_transfer(alice, make_transfer_id(alice_id, 1), None)
+    assert error_code(alice) == ErrorCode.FILE_REJECTED.value
+    start_transfer(alice, make_transfer_id(alice_id, 2), "")
+    assert error_code(alice) == ErrorCode.FILE_REJECTED.value
+
+
+def test_file_start_to_an_unknown_user_is_reported(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    start_transfer(alice, make_transfer_id(alice_id, 1), "nobody")
+    assert error_code(alice) == ErrorCode.UNKNOWN_USER.value
+    assert env.server._transfers == {}
+
+
+def test_file_that_is_too_large_is_rejected(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    too_large = server_module.MAX_FILE_SIZE + 1
+    alice.send(make_file_start(make_transfer_id(alice_id, 1), "big", too_large, 1, 0, to="bob"))
+    assert error_code(alice) == ErrorCode.FILE_REJECTED.value
+    expect_no_file_packet(bob)
+
+
+def test_a_transfer_id_of_another_client_is_rejected(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, bob_id = join_as(env, "bob")
+    carol, _ = join_as(env, "carol")
+    start_transfer(alice, make_transfer_id(bob_id, 1), "carol")  # not alice's id range
+    assert error_code(alice) == ErrorCode.FILE_REJECTED.value
+    # carol cannot push chunks into alice's running transfer either
+    mine = make_transfer_id(alice_id, 1)
+    start_transfer(alice, mine, "bob")
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    carol.send(make_file_chunk(mine, 0, b"hijack"))
+    assert error_code(carol) == ErrorCode.FILE_REJECTED.value
+    carol.send(make_file_end(mine))
+    assert error_code(carol) == ErrorCode.FILE_REJECTED.value
+    expect_no_file_packet(bob)
+    assert mine in env.server._transfers  # still running, untouched
+
+
+def test_chunks_of_an_unknown_transfer_are_dropped_silently(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    unknown = make_transfer_id(alice_id, 9)
+    alice.send(make_file_chunk(unknown, 0, b"x"))
+    alice.send(make_file_end(unknown))
+    alice.send(make_ping())
+    receive_type(alice, MessageType.PONG)  # the server is still fine and sent no ERROR
+    expect_no_file_packet(bob)
+
+
+def test_a_running_transfer_id_cannot_be_started_twice(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    transfer_id = make_transfer_id(alice_id, 1)
+    start_transfer(alice, transfer_id, "bob")
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    start_transfer(alice, transfer_id, "bob")
+    assert error_code(alice) == ErrorCode.FILE_REJECTED.value
+
+
+def test_file_end_forgets_the_transfer(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    transfer_id = make_transfer_id(alice_id, 1)
+    start_transfer(alice, transfer_id, "bob")
+    alice.send(make_file_end(transfer_id))
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    assert receive_file_packet(bob).type is MessageType.FILE_END
+    alice.send(make_file_chunk(transfer_id, 1, b"late"))  # no record any more: dropped
+    expect_no_file_packet(bob)
+    assert env.server._transfers == {}
+    start_transfer(alice, transfer_id, "bob")  # the id can be used again
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+
+
+@pytest.mark.parametrize("leaver", ["alice", "bob"])
+def test_transfers_are_forgotten_when_the_sender_or_recipient_leaves(
+    env: Env, leaver: str
+) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    start_transfer(alice, make_transfer_id(alice_id, 1), "bob")
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    assert len(env.server._transfers) == 1
+    {"alice": alice, "bob": bob}[leaver].send(make_bye(ByeReason.CLIENT_QUIT))
+    wait_for_event(env.events, EventType.CLIENT_LEFT, lambda e: e.data["username"] == leaver)
+    assert env.server._transfers == {}
+
+
+def test_client_ids_start_again_at_one_after_65535(env: Env) -> None:
+    env.server._next_client_id = 0xFFFF
+    _, last = join_as(env, "alice")
+    _, wrapped = join_as(env, "bob")
+    assert (last, wrapped) == (0xFFFF, 1)
