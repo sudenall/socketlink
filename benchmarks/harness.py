@@ -104,9 +104,10 @@ class Cluster:
                 pass
         self.server.stop()
 
-    def add_client(self, username: str) -> Peer:
+    def add_client(self, username: str, download_dir: str | None = None) -> Peer:
         bus = EventBus()
         events = bus.subscribe_queue()
+        extra = {} if download_dir is None else {"download_dir": download_dir}
         client = ChatClient(
             bus,
             ClientConfig(
@@ -118,6 +119,7 @@ class Cluster:
                 loss_rate=self.loss_rate,
                 delay_ms=self.delay_ms,
                 window_size=self.window_size,
+                **extra,
             ),
         )
         client.connect()
