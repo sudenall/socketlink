@@ -42,6 +42,7 @@ from socketlink.common.constants import (
     DEFAULT_WINDOW_SIZE,
     GUI_POLL_INTERVAL_MS,
     MAX_CHAT_LENGTH,
+    MAX_LOG_LINES,
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,
     MAX_WINDOW_SIZE,
@@ -442,6 +443,10 @@ class ClientApp:
                 transfer.done_bytes, transfer.total_bytes = data["done_bytes"], data["total_bytes"]
         elif event.type == EventType.FILE_COMPLETED:
             transfer.filename = Path(data["path"]).name
+            # Failure remains authoritative if a completion notification arrives late.
+            if transfer.finished and not transfer.completed:
+                self._render_transfer(key)
+                return
             transfer.done_bytes = transfer.total_bytes
             transfer.finished = transfer.completed = True
             transfer.status = ("Sent (recipient verification pending)" if direction == "upload"
@@ -557,8 +562,8 @@ class ClientApp:
             for line in str(message).splitlines() or [""]:
                 self.log_text.insert(tk.END, f"{clock} [{tag}] {line}\n", tag)
             lines = int(self.log_text.index("end-1c").split(".")[0]) - 1
-            if lines > 500:
-                self.log_text.delete("1.0", f"{lines - 500 + 1}.0")
+            if lines > MAX_LOG_LINES:
+                self.log_text.delete("1.0", f"{lines - MAX_LOG_LINES + 1}.0")
             self.log_text.see(tk.END)
         finally:
             self.log_text.configure(state=tk.DISABLED)
