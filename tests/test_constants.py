@@ -8,7 +8,9 @@ from __future__ import annotations
 import pytest
 
 from socketlink.common.constants import (
+    FILE_PROGRESS_INTERVAL,
     MAX_CONSECUTIVE_MALFORMED,
+    MAX_LOG_LINES,
     ByeReason,
     ClientErrorCode,
     DisconnectReason,
@@ -63,3 +65,9 @@ def test_file_fail_reason_values_are_the_documented_set() -> None:
 
 def test_malformed_limit_matches_the_spec_value() -> None:
     assert MAX_CONSECUTIVE_MALFORMED == 5  # docs/PROTOCOL.md section 7
+
+
+def test_log_and_progress_limits_match_the_readme() -> None:
+    assert MAX_LOG_LINES == 500  # README section 7: last 500 lines
+    assert 1 / FILE_PROGRESS_INTERVAL <= 10  # README section 7: at most ~10 events per second
+

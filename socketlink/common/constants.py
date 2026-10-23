@@ -54,6 +54,8 @@ HEARTBEAT_INTERVAL = 5.0     # client sends PING this often
 CONNECTION_TIMEOUT = 15.0    # no traffic for this long -> connection considered dead
 RECONNECT_DELAYS = (1.0, 2.0, 4.0, 8.0)  # back-off between reconnect attempts
 GUI_POLL_INTERVAL_MS = 50    # GUI reads the event queue this often
+MAX_LOG_LINES = 500          # lines kept in a GUI log (README section 7)
+FILE_PROGRESS_INTERVAL = 0.1  # seconds between FILE_PROGRESS events (at most ~10 per second)
 STATS_UPDATE_INTERVAL = 1.0  # STATS_UPDATED event period
 
 # --------------------------------------------------------------------------- #
