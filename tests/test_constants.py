@@ -9,8 +9,8 @@ import pytest
 
 from socketlink.common.constants import (
     FILE_PROGRESS_INTERVAL,
-    MAX_LOG_LINES,
     MAX_CONSECUTIVE_MALFORMED,
+    MAX_LOG_LINES,
     ByeReason,
     ClientErrorCode,
     DisconnectReason,
