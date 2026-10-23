@@ -27,8 +27,10 @@ import threading
 import time
 import tkinter as tk
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from tkinter import ttk
+from pathlib import Path
+from tkinter import filedialog, ttk
 
 from socketlink.client.client import ChatClient
 from socketlink.common.config import ClientConfig
@@ -60,6 +62,18 @@ from socketlink.gui import theme
 log = get_logger(__name__)
 
 
+@dataclass
+class _TransferDisplay:
+    """GUI-only presentation data, keyed by backend transfer ID and direction."""
+
+    filename: str = "—"
+    done_bytes: int = 0
+    total_bytes: int = 0
+    status: str = "In progress"
+    finished: bool = False
+    completed: bool = False
+
+
 class ClientApp:
     def __init__(self, root: tk.Tk, event_bus: EventBus | None = None) -> None:
         self.root = root
@@ -71,6 +85,9 @@ class ClientApp:
         self._connection_state = ConnectionState.DISCONNECTED
         self._send_thread: threading.Thread | None = None
         self._disconnect_thread: threading.Thread | None = None
+        self._file_thread: threading.Thread | None = None
+        self._file_starts: queue.Queue[tuple[int, str, str]] = queue.Queue()
+        self._transfers: dict[tuple[str, int], _TransferDisplay] = {}
         self._action_errors: queue.Queue[Exception] = queue.Queue()
         self._closing = False
         self._close_after_id: str | None = None
@@ -249,8 +266,16 @@ class ClientApp:
         )
         self.send_button.grid(row=1, column=1, sticky="e",
                               padx=theme.PAD_SMALL, pady=theme.PAD_SMALL)
+        self.send_file_button = tk.Button(
+            self.chat_panel, text="Send file...", command=self._on_send_file,
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+            disabledforeground=theme.COLOR_MUTED,
+        )
+        self.send_file_button.grid(row=2, column=1, sticky="e", padx=theme.PAD_SMALL)
+        self.user_list.bind("<<ListboxSelect>>", lambda _event: self._refresh_controls())
         self._build_udp_panel()
         self._build_monitor_panels()
+        self._build_transfer_panel()
         self._refresh_controls()
         self._poll_events()
 
@@ -310,6 +335,125 @@ class ClientApp:
             log.exception("Client GUI action failed")
             self._action_errors.put(exc)
 
+    def _on_send_file(self) -> None:
+        """Choose a file on Tk and pass the captured path/recipient to a worker."""
+        if self._closing or self.demo is not None or self.send_file_button["state"] == tk.DISABLED:
+            return
+        selection = self.user_list.curselection()
+        if not selection or selection[0] == 0:
+            self._report_action_error(ValidationError(
+                "Select one recipient before sending a file."
+            ))
+            return
+        recipient = self.user_list.get(selection[0])
+        path = filedialog.askopenfilename(parent=self.root, title="Choose a file to send")
+        if not path or self._closing:
+            return
+        # The dialog runs a nested event loop: connection state may have changed.
+        if self.client.state != ConnectionState.CONNECTED:
+            self._report_action_error(InvalidStateError("The connection is no longer available."))
+            return
+        self._file_thread = threading.Thread(
+            target=self._run_client_action,
+            args=(lambda: self._start_file_upload(path, recipient),),
+            name="gui-client-file", daemon=True,
+        )
+        self._file_thread.start()
+        self._refresh_controls()
+
+    def _start_file_upload(self, path: str, recipient: str) -> None:
+        """Backend validation may access disk; return its ID through a private queue."""
+        transfer_id = self.client.send_file(path, recipient)
+        self._file_starts.put((transfer_id, path, recipient))
+
+    def _build_transfer_panel(self) -> None:
+        """Show concurrent transfers and progress of the selected transfer."""
+        self.transfer_panel = tk.Frame(self.notebook, bg=theme.COLOR_PANEL)
+        self.notebook.add(self.transfer_panel, text="File transfers")
+        self.transfer_panel.columnconfigure(0, weight=1)
+        self.transfer_panel.rowconfigure(0, weight=1)
+        self.transfer_table = ttk.Treeview(
+            self.transfer_panel, columns=("direction", "filename", "status", "bytes"),
+            show="headings", selectmode="browse", height=4,
+        )
+        for key, title, width in (
+            ("direction", "Direction", 80), ("filename", "File", 180),
+            ("status", "Status", 260), ("bytes", "Bytes", 140),
+        ):
+            self.transfer_table.heading(key, text=title)
+            self.transfer_table.column(key, width=width, minwidth=60)
+        self.transfer_table.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(self.transfer_panel, command=self.transfer_table.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.transfer_table.configure(yscrollcommand=scrollbar.set)
+        self.transfer_progress = ttk.Progressbar(self.transfer_panel, maximum=100)
+        self.transfer_progress.grid(row=1, column=0, sticky="ew", pady=theme.PAD_SMALL)
+        self.transfer_status = tk.Label(
+            self.transfer_panel, text="Select a transfer to view progress.", anchor="w",
+            font=theme.FONT_NORMAL, bg=theme.COLOR_PANEL, fg=theme.COLOR_TEXT,
+        )
+        self.transfer_status.grid(row=2, column=0, sticky="ew")
+        self.transfer_status.bind(
+            "<Configure>", lambda event: self.transfer_status.configure(wraplength=event.width)
+        )
+        self.transfer_table.bind("<<TreeviewSelect>>", self._show_transfer_progress)
+
+    def _render_transfer(self, key: tuple[str, int]) -> None:
+        """Keep rows separate for simultaneous uploads and downloads."""
+        transfer = self._transfers[key]
+        iid = f"{key[0]}:{key[1]}"
+        values = (key[0].capitalize(), transfer.filename, transfer.status,
+                  f"{transfer.done_bytes} / {transfer.total_bytes}")
+        if self.transfer_table.exists(iid):
+            self.transfer_table.item(iid, values=values)
+        else:
+            self.transfer_table.insert("", tk.END, iid=iid, values=values)
+        if not self.transfer_table.selection():
+            self.transfer_table.selection_set(iid)
+        self._show_transfer_progress()
+
+    def _show_transfer_progress(self, _event: tk.Event | None = None) -> None:
+        """Update the selected transfer's bar only on the Tk thread."""
+        selected = self.transfer_table.selection()
+        if not selected:
+            return
+        direction, transfer_id = selected[0].split(":", 1)
+        transfer = self._transfers[(direction, int(transfer_id))]
+        percent = (min(100, max(0, transfer.done_bytes / transfer.total_bytes * 100))
+                   if transfer.total_bytes else 0)
+        if transfer.completed:
+            percent = 100  # Includes a successfully transferred empty file.
+        self.transfer_progress["value"] = percent
+        self.transfer_status.configure(
+            text=f"{transfer.filename}: {transfer.status} ({percent:.0f}%)"
+        )
+
+    def _handle_file_event(self, event: Event) -> None:
+        """Render only fields provided by the existing file event contracts."""
+        data = event.data
+        direction = "download" if event.type == EventType.FILE_OFFERED else data["direction"]
+        key = (direction, data["transfer_id"])
+        transfer = self._transfers.setdefault(key, _TransferDisplay())
+        if event.type == EventType.FILE_OFFERED:
+            transfer.filename, transfer.total_bytes = data["filename"], data["size"]
+            transfer.status = f"Receiving from {data['from']}"
+        elif event.type == EventType.FILE_PROGRESS:
+            if not transfer.finished:
+                transfer.done_bytes, transfer.total_bytes = data["done_bytes"], data["total_bytes"]
+        elif event.type == EventType.FILE_COMPLETED:
+            transfer.filename = Path(data["path"]).name
+            transfer.done_bytes = transfer.total_bytes
+            transfer.finished = transfer.completed = True
+            transfer.status = ("Sent (recipient verification pending)" if direction == "upload"
+                               else "Received and verified")
+            self._append_log("INFO", f"{transfer.status}: {data['path']}", event.timestamp)
+        elif event.type == EventType.FILE_FAILED:
+            transfer.finished = True
+            transfer.completed = False
+            transfer.status = self._file_failure_message(data["reason"])
+            self._show_notice(transfer.status, "ERROR", event)
+        self._render_transfer(key)
+
     def _report_action_error(self, exc: Exception) -> None:
         """Show a local action failure without introducing new event error codes."""
         if isinstance(exc, ValidationError):
@@ -325,11 +469,13 @@ class ClientApp:
         """Enable only actions valid for the last connection state and active workers."""
         sending = self._send_thread is not None and self._send_thread.is_alive()
         stopping = self._disconnect_thread is not None and self._disconnect_thread.is_alive()
+        preparing_file = self._file_thread is not None and self._file_thread.is_alive()
         real = self.demo is None and not self._closing
         idle = self._connection_state == ConnectionState.DISCONNECTED
         connected = self._connection_state == ConnectionState.CONNECTED
         self.connect_button.configure(state=tk.NORMAL if real and idle
-                                      and not sending and not stopping else tk.DISABLED)
+                                      and not sending and not stopping
+                                      and not preparing_file else tk.DISABLED)
         self.disconnect_button.configure(state=tk.NORMAL if real and not stopping
                                          and self._connection_state in (
                                              ConnectionState.CONNECTING, ConnectionState.CONNECTED,
@@ -339,6 +485,10 @@ class ClientApp:
                                    and not sending and not stopping else tk.DISABLED)
         self.message_entry.configure(state=tk.NORMAL if real and connected
                                      and not stopping else tk.DISABLED)
+        selection = self.user_list.curselection()
+        self.send_file_button.configure(state=tk.NORMAL if real and connected
+                                        and not stopping and not preparing_file
+                                        and selection and selection[0] > 0 else tk.DISABLED)
         for entry in self.config_entries:
             entry.configure(state=tk.NORMAL if real and idle else tk.DISABLED)
         for button in self.mode_buttons.values():
@@ -481,6 +631,7 @@ class ClientApp:
             FileFailReason.CHECKSUM_MISMATCH: "File integrity check failed",
             FileFailReason.WRITE_ERROR: "Could not save the file",
             FileFailReason.CONNECTION_LOST: "Connection lost during file transfer",
+            FileFailReason.RECIPIENT_LEFT: "The recipient left during file transfer",
         }
         return messages.get(getattr(reason, "value", reason), "File transfer failed")
 
@@ -579,6 +730,18 @@ class ClientApp:
         then reschedule with root.after(GUI_POLL_INTERVAL_MS, self._poll_events)."""
         while True:
             try:
+                transfer_id, path, recipient = self._file_starts.get_nowait()
+            except queue.Empty:
+                break
+            key = ("upload", transfer_id)
+            transfer = self._transfers.setdefault(key, _TransferDisplay())
+            transfer.filename = Path(path).name
+            if not transfer.finished:
+                transfer.status = f"Sending to {recipient}"
+            self._render_transfer(key)
+            self.notebook.select(self.transfer_panel)
+        while True:
+            try:
                 event = self.events.get_nowait()
             except queue.Empty:
                 break
@@ -633,8 +796,9 @@ class ClientApp:
         if event.type == EventType.ERROR:
             self._show_notice(self._error_message(data["code"]), "ERROR", event)
             return
-        if event.type == EventType.FILE_FAILED:
-            self._show_notice(self._file_failure_message(data["reason"]), "ERROR", event)
+        if event.type in (EventType.FILE_OFFERED, EventType.FILE_PROGRESS,
+                          EventType.FILE_COMPLETED, EventType.FILE_FAILED):
+            self._handle_file_event(event)
             return
         if event.type == EventType.MESSAGE_RECEIVED:
             timestamp = datetime.fromtimestamp(event.data["timestamp"]).strftime("%H:%M:%S")
@@ -702,7 +866,7 @@ class ClientApp:
 
     def _close_when_disconnected(self, deadline: float) -> None:
         """Wait without joining on Tk; core daemon workers own their transport cleanup."""
-        workers = (self._send_thread, self._disconnect_thread)
+        workers = (self._send_thread, self._disconnect_thread, self._file_thread)
         waiting = (self.client.state != ConnectionState.DISCONNECTED
                    or any(worker is not None and worker.is_alive() for worker in workers))
         if waiting and time.monotonic() < deadline:

@@ -20,6 +20,7 @@ from socketlink.common.config import ClientConfig  # noqa: E402
 from socketlink.common.constants import (  # noqa: E402
     ConnectionState,
     DisconnectReason,
+    FileFailReason,
     TransportMode,
 )
 from socketlink.common.events import Event, EventBus, EventType  # noqa: E402
@@ -282,3 +283,146 @@ def test_reconnecting_disables_send_and_allows_cancel(app: ClientApp) -> None:
     assert app.disconnect_button["state"] == tk.NORMAL
     app._handle_event(Event(EventType.DISCONNECTED, {"reason": DisconnectReason.USER.value}))
     assert app.connect_button["state"] == tk.NORMAL
+
+
+def _select_file_recipient(app: ClientApp) -> None:
+    """Set up a connected presentation without opening a socket for mocked actions."""
+    app.client._set_state(ConnectionState.CONNECTING)
+    app.client._set_state(ConnectionState.CONNECTED)
+    _wait(app, lambda: app.status_label["text"] == "Connected")
+    app._handle_event(Event(EventType.USER_LIST_UPDATED, {"users": ["Everyone"]}))
+    app.user_list.selection_clear(0, tk.END)
+    app.user_list.selection_set(1)  # The real user, not broadcast row zero.
+    app._refresh_controls()
+
+
+def test_file_dialog_cancel_and_recipient_requirement(app: ClientApp, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr("socketlink.gui.client_gui.filedialog.askopenfilename",
+                        lambda **kwargs: calls.append(kwargs) or "")
+    assert app.send_file_button["state"] == tk.DISABLED
+    _select_file_recipient(app)
+    assert app.send_file_button["state"] == tk.NORMAL
+    app.send_file_button.invoke()
+    assert calls[0]["parent"] is app.root
+    assert app._file_thread is None and not app._transfers
+    app.user_list.selection_clear(0, tk.END)
+    app.user_list.selection_set(0)
+    app._refresh_controls()
+    assert app.send_file_button["state"] == tk.DISABLED
+
+
+def test_file_preparation_is_nonblocking_and_reports_validation(app: ClientApp,
+                                                               monkeypatch) -> None:
+    _select_file_recipient(app)
+    monkeypatch.setattr("socketlink.gui.client_gui.filedialog.askopenfilename",
+                        lambda **_kwargs: "/missing/file.bin")
+    release = threading.Event()
+    seen = []
+
+    def slow_send_file(path, recipient):
+        seen.append((path, recipient, threading.get_ident()))
+        release.wait(timeout=2)
+        raise ValidationError("The selected file is unavailable")
+
+    monkeypatch.setattr(app.client, "send_file", slow_send_file)
+    begin = time.monotonic()
+    app.send_file_button.invoke()
+    assert time.monotonic() - begin < 0.3
+    assert app.send_file_button["state"] == tk.DISABLED
+    app.event_bus.publish(Event(EventType.LOG, {"level": "INFO", "message": "still responsive"}))
+    _wait(app, lambda: "still responsive" in app.log_text.get("1.0", "end-1c"))
+    release.set()
+    _wait(app, lambda: "unavailable" in app.notice_label["text"])
+    assert seen[0][:2] == ("/missing/file.bin", "Everyone")
+    assert seen[0][2] != threading.get_ident()
+    assert not app._transfers
+
+
+def test_transfer_events_keep_direction_progress_and_terminal_status(app: ClientApp) -> None:
+    events = [
+        Event(EventType.FILE_OFFERED, {"transfer_id": 9, "from": "alice",
+                                     "filename": "received.bin", "size": 100}),
+        Event(EventType.FILE_PROGRESS, {"transfer_id": 9, "direction": "download",
+                                      "done_bytes": 50, "total_bytes": 100}),
+        Event(EventType.FILE_PROGRESS, {"transfer_id": 9, "direction": "upload",
+                                      "done_bytes": 20, "total_bytes": 100}),
+    ]
+    for event in events:
+        event.validate()
+        app.event_bus.publish(event)
+    _wait(app, lambda: len(app._transfers) == 2)
+    assert float(app.transfer_progress["value"]) == 50
+    app.transfer_table.selection_set("upload:9")
+    app._show_transfer_progress()
+    assert float(app.transfer_progress["value"]) == 20
+    event = Event(EventType.FILE_FAILED, {"transfer_id": 9, "direction": "upload",
+                                       "reason": FileFailReason.RECIPIENT_LEFT.value})
+    event.validate()
+    app.event_bus.publish(event)
+    _wait(app, lambda: "recipient left" in app.notice_label["text"])
+    assert app._transfers[("download", 9)].done_bytes == 50
+    assert app._transfers[("upload", 9)].finished
+    app.event_bus.publish(Event(EventType.FILE_COMPLETED, {
+        "transfer_id": 9, "direction": "download", "path": "/downloads/received.bin",
+    }))
+    _wait(app, lambda: app._transfers[("download", 9)].completed)
+    app.transfer_table.selection_set("download:9")
+    app._show_transfer_progress()
+    assert float(app.transfer_progress["value"]) == 100
+    assert "Received and verified" in app.transfer_status["text"]
+    # A successful empty file has no denominator but still ends at 100%.
+    app._handle_event(Event(EventType.FILE_COMPLETED, {
+        "transfer_id": 10, "direction": "upload", "path": "/empty.bin",
+    }))
+    app._file_starts.put((10, "/empty.bin", "bob"))  # Late return from send_file().
+    _wait(app, lambda: app._file_starts.empty())
+    app.transfer_table.selection_set("upload:10")
+    app._show_transfer_progress()
+    assert float(app.transfer_progress["value"]) == 100
+    assert "recipient verification pending" in app.transfer_status["text"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("running_server", [TransportMode.TCP, TransportMode.UDP], indirect=True)
+def test_file_dialog_to_real_receiver(app: ClientApp, running_server, tmp_path,
+                                     monkeypatch) -> None:
+    server = running_server
+    source = tmp_path / "payload.bin"
+    payload = bytes(range(256)) * 32
+    source.write_bytes(payload)
+    peer_bus = EventBus()
+    received: list[Event] = []
+    peer_bus.subscribe(EventType.FILE_COMPLETED, received.append)
+    peer = ChatClient(peer_bus, ClientConfig(
+        host=server.host, port=server.port, mode=server.mode, username="bob",
+        auto_reconnect=False, download_dir=str(tmp_path / "downloads"),
+    ))
+    peer.connect()
+    try:
+        _wait(app, lambda: peer.state == ConnectionState.CONNECTED)
+        _configure(app, server.host, server.port, server.mode)
+        app.connect_button.invoke()
+        _wait(app, lambda: "bob" in app.user_list.get(0, tk.END))
+        users = app.user_list.get(0, tk.END)
+        app.user_list.selection_clear(0, tk.END)
+        app.user_list.selection_set(users.index("bob"))
+        app._refresh_controls()
+        monkeypatch.setattr("socketlink.gui.client_gui.filedialog.askopenfilename",
+                            lambda **_kwargs: str(source))
+        app.send_file_button.invoke()
+        _wait(app, lambda: received and any(t.completed for t in app._transfers.values()))
+        from pathlib import Path
+
+        assert Path(received[0].data["path"]).read_bytes() == payload
+        key = ("upload", received[0].data["transfer_id"])
+        assert app._transfers[key].completed
+        assert float(app.transfer_progress["value"]) == 100
+        assert "recipient verification pending" in app._transfers[key].status
+        # Messaging remains available after a file upload.
+        _wait(app, lambda: app.send_button["state"] == tk.NORMAL)
+        app.message_var.set("message after file")
+        app.send_button.invoke()
+        _wait(app, lambda: "message after file" in app.message_history.get("1.0", "end-1c"))
+    finally:
+        peer.disconnect()
