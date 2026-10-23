@@ -1,6 +1,6 @@
 <mxfile host="Electron" modified="2026-10-18T20:00:00.000Z" agent="Mozilla/5.0" version="21.6.8" type="device">
   <diagram id="HLD3" name="Detailed Network Sub-Diagram">
-    <mxGraphModel dx="1400" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1000" background="#ffffff" math="0" shadow="0">
+    <mxGraphModel dx="1400" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1620" background="#ffffff" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -154,9 +154,130 @@
           </mxGeometry>
         </mxCell>
 
-        <!-- Caption -->
-        <mxCell id="caption3" value="Figure 3.3: Detailed Network Sub-Diagram (HLD-3): Packet Format and Go-Back-N Retransmission Protocol" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=2" vertex="1" parent="1">
-          <mxGeometry x="220" y="860" width="700" height="30" as="geometry" />
+        <!-- Caption Part B -->
+        <mxCell id="caption_part_b" value="(Go-Back-N cumulative ACK and timeout retransmission window recovery)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=11;fontStyle=2;fontColor=#4b5563;" vertex="1" parent="1">
+          <mxGeometry x="280" y="830" width="500" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- SECTION 3: FILE TRANSFER RELAY & OWNERSHIP VERIFICATION -->
+        <mxCell id="relay_title" value="PART C: PROTOCOL v1.0.2 FILE TRANSFER RELAY &amp; OWNERSHIP VERIFICATION TIMELINE" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="60" y="870" width="900" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- Lifeline Headers -->
+        <mxCell id="c_alice" value="Sender: Alice (Client 1)&#xa;client_id = 1 (assigned on WELCOME)&#xa;transfer_id = (1 &lt;&lt; 16) | counter = 65537" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="905" width="250" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="c_server" value="ChatServer File Relay Router (Yusuf)&#xa;Ownership: transfer_id_client(id) == sender.client_id&#xa;Relay Table: transfer_id -&gt; (sender, recipient)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="420" y="905" width="360" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="c_bob" value="Recipient: Bob (Client 2)&#xa;client_id = 2, username = &quot;bob&quot;&#xa;FileReceiver (CRC32 Verification, FileFailReason)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="870" y="905" width="260" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Lifelines Part C -->
+        <mxCell id="line_alice" value="" style="endArrow=none;dashed=1;html=1;strokeWidth=2;strokeColor=#16a34a;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="185" y="1500" as="sourcePoint" />
+            <mxPoint x="185" y="955" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="line_srv_relay" value="" style="endArrow=none;dashed=1;html=1;strokeWidth=2;strokeColor=#2563eb;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="600" y="1500" as="sourcePoint" />
+            <mxPoint x="600" y="955" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="line_bob" value="" style="endArrow=none;dashed=1;html=1;strokeWidth=2;strokeColor=#d97706;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1000" y="1500" as="sourcePoint" />
+            <mxPoint x="1000" y="955" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Message: FILE_START from Alice to Server -->
+        <mxCell id="m_fstart_send" value="FILE_START [transfer_id=65537, to=&quot;bob&quot;, filename=&quot;doc.pdf&quot;, size=2048, total_chunks=2, checksum=0xA1B2C3D4]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="185" y="980" as="sourcePoint" />
+            <mxPoint x="600" y="1005" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Server Validation Box -->
+        <mxCell id="srv_val_box" value="ChatServer Core Verification (§5.4):&#xa;1. Ownership Check: transfer_id_client(65537) == 1 (Alice) ✓ [Mismatch -&gt; ERROR ErrorCode.FILE_REJECTED]&#xa;2. Recipient Check: &quot;bob&quot; in active_clients ✓ [Absent -&gt; ERROR ErrorCode.UNKNOWN_USER]&#xa;3. Store State: relay_table[65537] = (alice, bob)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=10;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="360" y="1015" width="480" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Message: FILE_START relayed to Bob -->
+        <mxCell id="m_fstart_relay" value="FILE_START [transfer_id=65537, from=&quot;alice&quot;, to=&quot;bob&quot;, size=2048, checksum=0xA1B2C3D4]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="600" y="1090" as="sourcePoint" />
+            <mxPoint x="1000" y="1115" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Bob Init Note -->
+        <mxCell id="bob_init_note" value="FileReceiver initialized&#xa;Allocate buffer &amp; checksum accumulator" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#fef3c7;strokeColor=#d97706;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="895" y="1125" width="210" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Message: FILE_CHUNK 0 -->
+        <mxCell id="m_fchunk0_send" value="FILE_CHUNK [8B Prefix: transfer_id=65537, chunk_idx=0] + 1024 B data" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="185" y="1180" as="sourcePoint" />
+            <mxPoint x="600" y="1205" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_fchunk0_relay" value="FILE_CHUNK [transfer_id=65537, chunk_idx=0] (Relayed via relay_table lookup)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="600" y="1215" as="sourcePoint" />
+            <mxPoint x="1000" y="1240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Message: FILE_CHUNK 1 -->
+        <mxCell id="m_fchunk1_send" value="FILE_CHUNK [8B Prefix: transfer_id=65537, chunk_idx=1] + 1024 B data" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="185" y="1255" as="sourcePoint" />
+            <mxPoint x="600" y="1280" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_fchunk1_relay" value="FILE_CHUNK [transfer_id=65537, chunk_idx=1] (Relayed via relay_table lookup)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="600" y="1290" as="sourcePoint" />
+            <mxPoint x="1000" y="1315" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Message: FILE_END -->
+        <mxCell id="m_fend_send" value="FILE_END [transfer_id=65537]" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#16a34a;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="185" y="1335" as="sourcePoint" />
+            <mxPoint x="600" y="1355" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Server Cleanup Note -->
+        <mxCell id="srv_cleanup_note" value="Cleanup: del relay_table[65537]&#xa;(Also cleaned on client disconnect)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=10;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="480" y="1365" width="240" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- Message: FILE_END relayed -->
+        <mxCell id="m_fend_relay" value="FILE_END [transfer_id=65537] (Relayed to Bob)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=10;fontStyle=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="600" y="1410" as="sourcePoint" />
+            <mxPoint x="1000" y="1435" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Bob Integrity Validation Box -->
+        <mxCell id="bob_val_box" value="Bob File Integrity Verification:&#xa;Compute whole-file zlib.crc32(payload) == checksum&#xa;• Success: Write to downloads/ and fire FILE_COMPLETED&#xa;• Checksum Error: Discard and fire FILE_FAILED (reason=FileFailReason.CHECKSUM_MISMATCH)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d97706;fontFamily=Times New Roman;fontSize=10;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="780" y="1445" width="380" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Overall Caption -->
+        <mxCell id="caption3" value="Figure 3.3: Detailed Network Sub-Diagram (HLD-3): Packet Format, Reliable UDP Go-Back-N Protocol, and File Relay Sequence (v1.0.2)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Times New Roman;fontSize=13;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="150" y="1530" width="850" height="30" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

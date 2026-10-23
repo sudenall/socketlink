@@ -231,8 +231,12 @@ def make_file_end(transfer_id: int) -> Packet:
     return _json_packet(MessageType.FILE_END, {"transfer_id": transfer_id})
 
 
-def make_error(code: str, message: str) -> Packet:
-    return _json_packet(MessageType.ERROR, {"code": code, "message": message})
+def make_error(code: str, message: str, transfer_id: int | None = None) -> Packet:
+    """`transfer_id` is set only for file-transfer errors (PROTOCOL.md 4, 5.4, v1.1)."""
+    fields: dict[str, Any] = {"code": code, "message": message}
+    if transfer_id is not None:
+        fields["transfer_id"] = transfer_id
+    return _json_packet(MessageType.ERROR, fields)
 
 
 def make_bye(reason: str = ByeReason.CLIENT_QUIT.value) -> Packet:

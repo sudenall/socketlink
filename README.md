@@ -186,7 +186,7 @@ ruff check .              # "All checks passed!"
 ```
 `.venv` klasörü `.gitignore`'da; **asla commit'lenmez**.
 
-### 5.3 Çalıştırma
+### 5.3 Çalıştırma / How to Run
 Komutlar **repo kök klasöründen** çalıştırılır (yoksa `import socketlink` bulunamaz):
 ```bash
 python run_server.py      # sunucu dashboard'u
@@ -195,6 +195,36 @@ python run_client.py      # bir client penceresi — birden fazla kullanıcı i�
 - Aynı bilgisayarda test: client'ta host `127.0.0.1`, port `5050`.
 - Farklı bilgisayarlar (aynı Wi-Fi): sunucu bind host `0.0.0.0`; client'lar sunucunun yerel IP'sini girer (Windows `ipconfig`, macOS/Linux `ipconfig getifaddr en0` / `ip addr`).
 - Okul/yurt ağları genelde cihazlar arası trafiği engeller; uzaktan ortak test için herkes **kendi bilgisayarında localhost** ile çalışır, entegrasyon demosu ekran paylaşımıyla yapılır.
+
+#### How to Run (English Guide)
+
+All commands must be executed from the **repository root directory** with the virtual environment activated:
+
+1. **Start the Server Dashboard:**
+   ```bash
+   python run_server.py
+   ```
+   - Launches the Tkinter server dashboard.
+   - Configure Bind Host (`0.0.0.0` for LAN access, `127.0.0.1` for local loopback) and Port (`5050`).
+   - Select transport protocol: **TCP** or **Reliable UDP** (Go-Back-N ARQ).
+   - Click **Start** to listen for incoming client connections.
+   - *Standalone Server Demo Mode:* `python run_server.py --demo` runs an interactive simulation generating mock clients, traffic, and loss events without opening physical sockets.
+
+2. **Launch Client Instance(s):**
+   ```bash
+   python run_client.py
+   ```
+   - Opens a client GUI window. Open multiple terminal windows or run several instances simultaneously to test multi-user group chat and file transfers.
+   - Enter Server Host (`127.0.0.1` or the server machine's LAN IP) and Port (`5050`).
+   - Choose transport mode (**TCP** or **Reliable UDP** matching the server).
+   - Enter a valid username (3 to 16 characters: letters, numbers, underscores).
+   - Click **Connect** to perform the handshake (`HELLO` / `WELCOME`).
+   - *Standalone Client Demo Mode:* `python run_client.py --demo` demonstrates GUI features, mock chat messages, and packet logs without a live server.
+
+3. **Multi-User and Network Simulation Testing:**
+   - **Group & Private Chat:** Select "Everyone" for broadcast messages, or select a specific user from the recipient dropdown for private direct messages.
+   - **Reliable File Transfer:** Chunked file transfer (`FILE_START`, `FILE_CHUNK`, `FILE_END`) with 1 KB chunks, per-chunk sequencing, and full-file CRC32 verification.
+   - **Simulated Packet Loss & Latency (UDP):** Use the network simulation panel sliders (0% to 50% packet loss, 0 to 1000 ms delay) to observe Go-Back-N window retransmissions and timeout recovery in real-time.
 
 ### 5.4 Testler
 ```bash
@@ -735,7 +765,7 @@ Ders politikasını Yiğit hocaya teyit eder ve `#duyurular`'a yazar. Her durumd
 
 | Ne | Link |
 |---|---|
-| Rapor (Google Docs) | _Nevin ekleyecek_ |
+| Rapor (Google Docs) | _Ekip içi özel doküman (erişim yetkisi için Nevin'e yazınız)_ |
 | Durum tablosu (Google Sheets) | _Nevin ekleyecek_ |
 | Kaynak tablosu (Google Sheets) | _Nevin ekleyecek_ |
 | GitHub Projects panosu | _Sude ekleyecek_ |

@@ -51,16 +51,16 @@
           <mxGeometry x="40" y="140" width="380" height="45" as="geometry" />
         </mxCell>
 
-        <mxCell id="s_core" value="ChatServer Core (Yusuf)&#xa;State: Active Client Directory (dict[str, ClientHandler] + Lock)&#xa;Methods: start(), stop(), broadcast(), kick(user, ByeReason), get_stats()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="serverBox">
-          <mxGeometry x="40" y="215" width="380" height="65" as="geometry" />
+        <mxCell id="s_core" value="ChatServer Core (Yusuf)&#xa;State: Active Client Directory (dict[str, ClientHandler] + Lock)&#xa;Methods: start(), stop(), broadcast(), kick(user, ByeReason), get_stats()&#xa;Relay: routes FILE_* packets, rejects with ErrorCode.FILE_REJECTED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="215" width="380" height="70" as="geometry" />
         </mxCell>
 
         <mxCell id="s_threads" value="Daemon Threads:&#xa;• srv-accept (listener.accept() loop)&#xa;• srv-client-&lt;user&gt; (Thread-per-client ClientHandler)&#xa;• srv-watchdog (Checks DisconnectReason.TIMEOUT)&#xa;• udp-demux (Demultiplexes UDP packets to ClientHandlers)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="serverBox">
-          <mxGeometry x="40" y="310" width="380" height="85" as="geometry" />
+          <mxGeometry x="40" y="305" width="380" height="85" as="geometry" />
         </mxCell>
 
-        <mxCell id="s_handlers" value="ClientHandler Instances (1 per connected client, up to 50)&#xa;Loops on transport.receive(), handles HELLO, CHAT, BYE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="serverBox">
-          <mxGeometry x="40" y="420" width="380" height="50" as="geometry" />
+        <mxCell id="s_handlers" value="ClientHandler Instances (1 per connected client, up to 50)&#xa;Loops on transport.receive(), handles HELLO, CHAT, BYE&#xa;File Relay Router: transfer_id -&gt; (sender, recipient) mapping&#xa;Ownership Rule: transfer_id_client(id) == sender.client_id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;" vertex="1" parent="serverBox">
+          <mxGeometry x="40" y="410" width="380" height="65" as="geometry" />
         </mxCell>
 
         <mxCell id="s_listener" value="TransportListener (Strategy Pattern)&#xa;TcpListener / ReliableUdpListener (Port 5050)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#2563eb;fontFamily=Times New Roman;fontSize=11;fontStyle=1;" vertex="1" parent="serverBox">

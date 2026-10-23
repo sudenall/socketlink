@@ -186,6 +186,7 @@ class FileFailReason(str, Enum):
     READ_ERROR = "read_error"              # the local file could not be read
     SEND_ERROR = "send_error"              # the transport failed while sending
     CANCELLED = "cancelled"                # the user cancelled the transfer
+    RECIPIENT_LEFT = "recipient_left"      # the server reported that the recipient is gone
     # download (FileReceiver)
     FILE_TOO_LARGE = "file_too_large"      # announced size exceeds MAX_FILE_SIZE
     BAD_PACKET = "bad_packet"              # FILE_* packet with missing/invalid fields
