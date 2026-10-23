@@ -12,9 +12,9 @@ heartbeat watchdog -> every second: disconnect clients silent > CONNECTION_TIMEO
 All threads: daemon=True, name="srv-accept" / "srv-client-<username>" / "srv-watchdog",
 and they all stop when `self._stop_event` is set.
 
-Shared state: `self._clients` (lower-cased username -> ClientHandler) and `self._handlers`
-(every open connection, registered or not) are ONLY touched while holding
-`self._clients_lock`. Never send on a socket while holding the lock
+Shared state: `self._clients` (lower-cased username -> ClientHandler), `self._handlers`
+(every open connection, registered or not) and `self._transfers` (running file transfers)
+are ONLY touched while holding `self._clients_lock`. Never send on a socket while holding the lock
 (copy the list first, release, then send).
 """
 
@@ -32,6 +32,7 @@ from socketlink.common.constants import (
     CONNECTION_TIMEOUT,
     MAX_CHAT_LENGTH,
     MAX_CONSECUTIVE_MALFORMED,
+    MAX_FILE_SIZE,
     MAX_SIMULATED_DELAY_MS,
     MAX_SIMULATED_LOSS,
     SOCKET_TIMEOUT,
@@ -59,17 +60,32 @@ from socketlink.common.protocol import (
     make_bye,
     make_chat,
     make_error,
+    make_file_end,
+    make_file_start,
     make_pong,
     make_user_list,
     make_welcome,
+    parse_file_chunk,
+    transfer_id_client,
 )
 from socketlink.common.stats import TransportStats
 from socketlink.common.transport import Address, Transport, TransportListener, create_listener
-from socketlink.reliability.reliable_udp import ReliableUdpTransport
 
 log = get_logger(__name__)
 
 _USERNAME_RE = re.compile(USERNAME_PATTERN)
+
+# client_id travels in the upper 16 bits of every transfer_id (PROTOCOL.md 4.1), so ids are
+# 1..65535 and start again at 1 after that.
+_MAX_CLIENT_ID = 0xFFFF
+
+
+def _require_int(payload: dict[str, Any], key: str) -> int:
+    """`payload[key]` as a whole number, or MalformedPacketError (booleans do not count)."""
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise MalformedPacketError(f"The packet needs a whole number '{key}'.")
+    return value
 
 
 class RegistrationError(ValidationError):
@@ -110,6 +126,7 @@ class ClientHandler(threading.Thread):
         self.server = server
         self.transport = transport
         self.username: str | None = None
+        self.client_id = 0  # assigned by register(); the upper 16 bits of its transfer ids
         self.connected_at = time.time()
         self.last_seen = self.connected_at
         self._close_lock = threading.Lock()
@@ -299,11 +316,55 @@ class ClientHandler(threading.Thread):
         self.disconnect(DisconnectReason.from_bye(reason))
 
     def _handle_file_packet(self, packet: Packet) -> None:
-        """File relay comes in a later PR; until then FILE_START is refused politely."""
-        if packet.type is MessageType.FILE_START:
-            self._send_error(ErrorCode.FILE_REJECTED, "File transfer is not available yet.")
+        """Relay FILE_START, FILE_CHUNK and FILE_END to the recipient (PROTOCOL.md 5.4)."""
+        kind = packet.type
+        if kind is MessageType.FILE_START:
+            self._relay_file_start(packet)
+            return
+        if kind is MessageType.FILE_CHUNK:
+            transfer_id = parse_file_chunk(packet)[0]
         else:
-            log.debug("Dropping %s from %s", packet.type.name, self._label)
+            transfer_id = _require_int(packet.json_payload(), "transfer_id")
+        if transfer_id_client(transfer_id) != self.client_id:
+            self._send_error(ErrorCode.FILE_REJECTED, "That transfer_id does not belong to you.")
+            return
+        recipient = self.server.transfer_recipient(
+            self, transfer_id, finished=kind is MessageType.FILE_END
+        )
+        if recipient is None:
+            log.debug("Dropping %s of unknown transfer %d from %s", kind.name, transfer_id,
+                      self._label)
+            return
+        recipient.send(packet)
+
+    def _relay_file_start(self, packet: Packet) -> None:
+        payload = packet.json_payload()
+        transfer_id = _require_int(payload, "transfer_id")
+        size = _require_int(payload, "size")
+        total_chunks = _require_int(payload, "total_chunks")
+        checksum = _require_int(payload, "checksum")
+        filename, to = payload.get("filename"), payload.get("to")
+        if not isinstance(filename, str) or not filename:
+            raise MalformedPacketError("FILE_START needs a text field 'filename'.")
+        if transfer_id_client(transfer_id) != self.client_id:
+            self._send_error(ErrorCode.FILE_REJECTED, "That transfer_id does not belong to you.")
+        elif not isinstance(to, str) or not to:
+            self._send_error(ErrorCode.FILE_REJECTED, "A file needs a recipient ('to').")
+        elif size > MAX_FILE_SIZE:
+            self._send_error(ErrorCode.FILE_REJECTED, f"The file is larger than {MAX_FILE_SIZE} B.")
+        else:
+            result = self.server.open_transfer(self, transfer_id, to)
+            if result is ErrorCode.UNKNOWN_USER:
+                self._send_error(ErrorCode.UNKNOWN_USER, f"User '{to}' is not connected.")
+            elif isinstance(result, ErrorCode):
+                self._send_error(result, "That transfer_id is already in use.")
+            else:
+                result.send(
+                    make_file_start(
+                        transfer_id, filename, size, total_chunks, checksum,
+                        to=to, sender=self.username,
+                    )
+                )
 
     # ---- helpers ---------------------------------------------------------
     @property
@@ -341,6 +402,9 @@ class ChatServer:
         self._accept_thread: threading.Thread | None = None
         self._watchdog_thread: threading.Thread | None = None
         self._next_client_id = 1
+        # transfer_id -> (sender, recipient) of every FILE_START that was accepted and has not
+        # ended yet. The server stores no file data, only this routing table.
+        self._transfers: dict[int, tuple[ClientHandler, ClientHandler]] = {}
         # Simulated network (reliable UDP only), applied to every transport, old and new.
         self._loss_rate = self.config.loss_rate
         self._delay_ms = self.config.delay_ms
@@ -461,7 +525,8 @@ class ChatServer:
                 self._clients[key] = handler
                 handler.ready = True  # private messages and broadcasts reach it from now on
                 client_id = self._next_client_id
-                self._next_client_id += 1
+                self._next_client_id = client_id % _MAX_CLIENT_ID + 1
+                handler.client_id = client_id
                 users = self._user_names_locked()
             handler.name = f"srv-client-{username}"
             log.info("%s joined (client_id=%d)", username, client_id)
@@ -477,14 +542,26 @@ class ChatServer:
     def unregister(self, handler: ClientHandler, reason: str) -> None:
         """Remove `handler`. `reason` must be a DisconnectReason value. Idempotent: the
         CLIENT_LEFT event and the USER_LIST update happen only the first time."""
+        orphaned: list[tuple[int, ClientHandler]] = []
         with self._clients_lock:
             if handler in self._handlers:
                 self._handlers.discard(handler)
                 self._add_to_closed_totals(handler.transport.stats.snapshot())
+            for transfer_id in [
+                tid for tid, ends in self._transfers.items() if handler in ends
+            ]:
+                sender, recipient = self._transfers.pop(transfer_id)  # one of them is gone
+                if sender is handler and recipient is not handler:
+                    orphaned.append((transfer_id, recipient))
             key = handler.username.lower() if handler.username is not None else None
             was_registered = key is not None and self._clients.get(key) is handler
             if was_registered and key is not None:
                 del self._clients[key]
+        # The sender is gone mid-transfer: an early FILE_END makes the recipient drop the partial
+        # file (its FileReceiver reports FILE_FAILED) instead of waiting forever. The lock is
+        # released here, as it must be while sending.
+        for transfer_id, recipient in orphaned:
+            recipient.send(make_file_end(transfer_id))
         if not was_registered:
             return  # never completed HELLO, or already removed
         log.info("%s left (%s)", handler.username, reason)
@@ -507,6 +584,36 @@ class ChatServer:
             return False
         handler.send(packet)
         return True
+
+    # ---- file relay (called by ClientHandler) ------------------------------
+    def open_transfer(
+        self, sender: ClientHandler, transfer_id: int, to: str
+    ) -> ClientHandler | ErrorCode:
+        """Record `transfer_id` as running from `sender` to the user `to`.
+
+        Return the recipient, UNKNOWN_USER if `to` is not connected, or FILE_REJECTED if the
+        id is already in use."""
+        with self._clients_lock:
+            recipient = self._clients.get(to.lower())
+            if recipient is None or not recipient.ready:
+                return ErrorCode.UNKNOWN_USER
+            if transfer_id in self._transfers:
+                return ErrorCode.FILE_REJECTED
+            self._transfers[transfer_id] = (sender, recipient)
+            return recipient
+
+    def transfer_recipient(
+        self, sender: ClientHandler, transfer_id: int, finished: bool = False
+    ) -> ClientHandler | None:
+        """The recipient of `sender`'s running transfer, or None if there is no such transfer.
+        With `finished` the transfer is forgotten (FILE_END)."""
+        with self._clients_lock:
+            ends = self._transfers.get(transfer_id)
+            if ends is None or ends[0] is not sender:
+                return None
+            if finished:
+                del self._transfers[transfer_id]
+            return ends[1]
 
     # ---- dashboard helpers -------------------------------------------------
     def get_clients(self) -> list[ClientInfo]:
@@ -579,8 +686,7 @@ class ChatServer:
         The caller holds `_clients_lock`."""
         try:
             transport.set_network_conditions(self._loss_rate, self._delay_ms)
-            if isinstance(transport, ReliableUdpTransport):
-                transport.set_window_size(self.config.window_size)
+            transport.set_window_size(self.config.window_size)  # TCP ignores it
         except ValidationError as exc:  # a bad config value must not kill the accept thread
             log.warning("Transport settings were not applied: %s", exc)
 
