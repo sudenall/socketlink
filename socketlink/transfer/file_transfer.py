@@ -88,6 +88,7 @@ class FileSender:
         self.event_bus = event_bus
         self.to = to
         self._cancel_event = threading.Event()
+        self._cancel_reason = FileFailReason.CANCELLED.value
 
     def validate(self) -> int:
         """Check the transfer can start and return the file size in bytes.
@@ -145,11 +146,14 @@ class FileSender:
                  self.transfer_id, self.path, size, self.to)
         self._publish(EventType.FILE_COMPLETED, {"path": self.path})
 
-    def cancel(self) -> None:
+    def cancel(self, reason: str = FileFailReason.CANCELLED.value) -> None:
         """Stop sending after the current chunk. Safe to call from any thread, more than once.
 
         The receiver gets an early FILE_END, so it drops the transfer (missing_chunks).
+        `reason` becomes the FILE_FAILED reason (a FileFailReason value), e.g.
+        RECIPIENT_LEFT when the server reports that the recipient is gone (PROTOCOL.md 5.4).
         """
+        self._cancel_reason = reason
         self._cancel_event.set()
 
     # ---- internals ----------------------------------------------------------
@@ -162,7 +166,7 @@ class FileSender:
                 for chunk_index in range(total_chunks):
                     if self._cancel_event.is_set():
                         log.info("Transfer %d cancelled", self.transfer_id)
-                        self._end_early(FileFailReason.CANCELLED.value)
+                        self._end_early(self._cancel_reason)
                         return False
                     data = file.read(FILE_CHUNK_SIZE)
                     if not data:

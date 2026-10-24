@@ -364,6 +364,20 @@ class ChatClient:
             with self._transfer_lock:
                 self._uploads.pop(sender.transfer_id, None)
 
+    def _stop_upload_on_error(self, transfer_id: object) -> None:
+        """An ERROR with a transfer_id (PROTOCOL.md 5.4, v1.1) ends that upload: the server
+        drops its remaining chunks (e.g. the recipient left), so it must not end as
+        FILE_COMPLETED. The upload stops after its current chunk with FILE_FAILED
+        recipient_left. An upload that already finished, or an unknown id, is ignored.
+        """
+        if not isinstance(transfer_id, int) or isinstance(transfer_id, bool):
+            return
+        with self._transfer_lock:
+            sender = self._uploads.get(transfer_id)
+        if sender is not None:
+            log.info("Upload %d stopped by the server", transfer_id)
+            sender.cancel(FileFailReason.RECIPIENT_LEFT.value)
+
     def _cancel_uploads(self) -> None:
         """User disconnect: every upload stops after its current chunk (reason cancelled)."""
         with self._transfer_lock:
@@ -497,11 +511,16 @@ class ChatClient:
         stop_event.set()
         self._close_transport()
         self._abort_downloads()
-        if self._state is ConnectionState.CONNECTED:
+        state = self._state
+        if state in (ConnectionState.DISCONNECTING, ConnectionState.DISCONNECTED):
+            # disconnect() owns DISCONNECTING and finishes it itself; stepping in here made
+            # its own DISCONNECTING -> DISCONNECTED fail with InvalidStateError.
+            return
+        if state is ConnectionState.CONNECTED:
             try:
                 self._set_state(ConnectionState.DISCONNECTING)
             except InvalidStateError:
-                return
+                return  # disconnect() got there first
         try:
             self._set_state(ConnectionState.DISCONNECTED)
         except InvalidStateError:
@@ -584,6 +603,7 @@ class ChatClient:
             code = str(payload.get("code", ""))
             message = str(payload.get("message", ""))
             log.warning("Server error %s: %s", code, message)
+            self._stop_upload_on_error(payload.get("transfer_id"))
             self._publish(EventType.ERROR, {"code": code, "message": message})
         elif message_type is MessageType.BYE:
             bye_reason = str(packet.json_payload().get("reason", ""))
