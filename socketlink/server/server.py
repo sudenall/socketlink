@@ -525,6 +525,9 @@ class ChatServer:
                 self._clients[key] = handler
                 handler.ready = True  # private messages and broadcasts reach it from now on
                 client_id = self._next_client_id
+                in_use = {other.client_id for other in self._clients.values()}
+                while client_id in in_use:  # after wrapping, skip ids of connected clients
+                    client_id = client_id % _MAX_CLIENT_ID + 1
                 self._next_client_id = client_id % _MAX_CLIENT_ID + 1
                 handler.client_id = client_id
                 users = self._user_names_locked()
@@ -542,7 +545,8 @@ class ChatServer:
     def unregister(self, handler: ClientHandler, reason: str) -> None:
         """Remove `handler`. `reason` must be a DisconnectReason value. Idempotent: the
         CLIENT_LEFT event and the USER_LIST update happen only the first time."""
-        orphaned: list[tuple[int, ClientHandler]] = []
+        orphaned: list[tuple[int, ClientHandler]] = []  # (transfer_id, recipient)
+        abandoned: list[tuple[int, ClientHandler]] = []  # (transfer_id, sender)
         with self._clients_lock:
             if handler in self._handlers:
                 self._handlers.discard(handler)
@@ -553,6 +557,8 @@ class ChatServer:
                 sender, recipient = self._transfers.pop(transfer_id)  # one of them is gone
                 if sender is handler and recipient is not handler:
                     orphaned.append((transfer_id, recipient))
+                elif recipient is handler and sender is not handler:
+                    abandoned.append((transfer_id, sender))
             key = handler.username.lower() if handler.username is not None else None
             was_registered = key is not None and self._clients.get(key) is handler
             if was_registered and key is not None:
@@ -562,6 +568,12 @@ class ChatServer:
         # released here, as it must be while sending.
         for transfer_id, recipient in orphaned:
             recipient.send(make_file_end(transfer_id))
+        # The recipient is gone mid-transfer: tell each sender once, with the transfer_id, so
+        # that its upload fails instead of ending as "completed" (PROTOCOL.md 5.4, v1.1).
+        for transfer_id, sender in abandoned:
+            sender.send(
+                make_error(ErrorCode.UNKNOWN_USER.value, "The recipient left.", transfer_id)
+            )
         if not was_registered:
             return  # never completed HELLO, or already removed
         log.info("%s left (%s)", handler.username, reason)

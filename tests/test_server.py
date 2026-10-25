@@ -716,11 +716,58 @@ def test_recipient_is_told_when_the_sender_leaves_mid_transfer(env: Env, how: st
     assert env.server._transfers == {}
 
 
-def test_sender_is_not_told_when_the_recipient_leaves_mid_transfer(env: Env) -> None:
+def expect_no_error(transport: Transport) -> None:
+    deadline = time.monotonic() + QUIET
+    while True:
+        try:
+            packet = transport.receive(timeout=max(deadline - time.monotonic(), 0.01))
+        except TransportTimeoutError:
+            return
+        assert packet.type is not MessageType.ERROR
+
+
+def test_sender_is_told_once_when_the_recipient_leaves_mid_transfer(env: Env) -> None:
     alice, alice_id = join_as(env, "alice")
     bob, _ = join_as(env, "bob")
-    start_transfer(alice, make_transfer_id(alice_id, 1), "bob")
+    transfer_id = make_transfer_id(alice_id, 1)
+    start_transfer(alice, transfer_id, "bob")
     assert receive_file_packet(bob).type is MessageType.FILE_START
     bob.send(make_bye(ByeReason.CLIENT_QUIT))
-    wait_for_event(env.events, EventType.CLIENT_LEFT, lambda e: e.data["username"] == "bob")
-    expect_no_file_packet(alice)  # no FILE_* packet goes back to the sender
+    error = receive_type(alice, MessageType.ERROR).json_payload()
+    assert error["code"] == ErrorCode.UNKNOWN_USER.value
+    assert error["transfer_id"] == transfer_id
+    expect_no_error(alice)  # once, not once per remaining chunk
+    expect_no_file_packet(alice)
+
+
+def test_every_sender_is_told_about_its_own_transfer(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    carol, carol_id = join_as(env, "carol")
+    bob, _ = join_as(env, "bob")
+    first, second = make_transfer_id(alice_id, 1), make_transfer_id(carol_id, 1)
+    start_transfer(alice, first, "bob")
+    start_transfer(carol, second, "bob")
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    bob.send(make_bye(ByeReason.CLIENT_QUIT))
+    assert receive_type(alice, MessageType.ERROR).json_payload()["transfer_id"] == first
+    assert receive_type(carol, MessageType.ERROR).json_payload()["transfer_id"] == second
+
+
+def test_sender_gets_no_error_while_the_recipient_is_connected(env: Env) -> None:
+    alice, alice_id = join_as(env, "alice")
+    bob, _ = join_as(env, "bob")
+    transfer_id = make_transfer_id(alice_id, 1)
+    start_transfer(alice, transfer_id, "bob")
+    alice.send(make_file_chunk(transfer_id, 0, b"abc"))
+    assert receive_file_packet(bob).type is MessageType.FILE_START
+    assert receive_file_packet(bob).type is MessageType.FILE_CHUNK
+    expect_no_error(alice)
+
+
+def test_a_client_id_in_use_is_skipped_after_the_ids_wrap(env: Env) -> None:
+    _, alice_id = join_as(env, "alice")
+    env.server._next_client_id = alice_id  # as if the counter had come around to alice again
+    _, bob_id = join_as(env, "bob")
+    assert bob_id != alice_id
+    assert env.server._next_client_id == bob_id + 1
