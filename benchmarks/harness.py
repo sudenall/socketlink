@@ -104,7 +104,12 @@ class Cluster:
                 pass
         self.server.stop()
 
-    def add_client(self, username: str, download_dir: str | None = None) -> Peer:
+    def add_client(
+        self,
+        username: str,
+        download_dir: str | None = None,
+        auto_reconnect: bool = False,
+    ) -> Peer:
         bus = EventBus()
         events = bus.subscribe_queue()
         extra = {} if download_dir is None else {"download_dir": download_dir}
@@ -115,7 +120,7 @@ class Cluster:
                 port=self._port,
                 mode=self.mode,
                 username=username,
-                auto_reconnect=False,
+                auto_reconnect=auto_reconnect,
                 loss_rate=self.loss_rate,
                 delay_ms=self.delay_ms,
                 window_size=self.window_size,
