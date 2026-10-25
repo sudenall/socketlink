@@ -85,7 +85,8 @@ class FakeServer:
     never answer; `silent=True` makes it ignore PINGs after the handshake.
     `drop_sender_after_chunks=n` closes the sender's connection when its n-th chunk
     arrives; `drop_target_after_chunks=n` closes the receiver's connection instead of
-    forwarding the n-th chunk.
+    forwarding the n-th chunk and, like the real server (PROTOCOL.md 5.4, v1.1), tells the
+    sender with ERROR UNKNOWN_USER + transfer_id.
     """
 
     def __init__(self, reject_code: str | None = None, answer_hello: bool = True,
@@ -231,6 +232,8 @@ class FakeServer:
                 return
             if seen == self.drop_target_after_chunks:
                 target.close()
+                transport.send(p.make_error(ErrorCode.UNKNOWN_USER.value, "The recipient left.",
+                                            transfer_id=transfer_id))
                 return
         try:
             target.send(packet)
@@ -917,3 +920,45 @@ def test_file_events_follow_the_event_contract(
     assert file_events
     for event in file_events:
         event.validate()
+
+
+def test_recipient_leaving_fails_the_upload_with_recipient_left(
+        chat_client: ChatClient, event_queue: queue.Queue[Event], tmp_path: Path) -> None:
+    """PROTOCOL v1.1: ERROR with the transfer_id of a running upload stops it; the sender
+    sees FILE_FAILED(recipient_left), not FILE_COMPLETED. The ERROR event still arrives."""
+    fake = FakeServer(drop_target_after_chunks=20).start()
+    bob, _ = connect_named(EventBus(), fake.port, "bob", tmp_path / "downloads",
+                           auto_reconnect=False)
+    try:
+        connect(chat_client, event_queue, fake.port)
+        # big enough that the upload is still running when the ERROR comes back
+        path = write_random_file(tmp_path, "big.bin", 16 * 1024 * 1024)
+        transfer_id = chat_client.send_file(str(path), to="bob")
+        failed = file_event(event_queue, EventType.FILE_FAILED, transfer_id, "upload")
+        assert failed.data["reason"] == FileFailReason.RECIPIENT_LEFT
+        assert chat_client.state is ConnectionState.CONNECTED  # only the upload ends
+    finally:
+        bob.disconnect()
+        fake.stop()
+
+
+def test_error_with_unknown_transfer_id_is_only_reported(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    connect(chat_client, event_queue, server.port)
+    server.send_to_all(p.make_error(ErrorCode.UNKNOWN_USER.value, "gone", transfer_id=999))
+    error = wait_for(event_queue, EventType.ERROR)
+    assert error.data["code"] == ErrorCode.UNKNOWN_USER
+    assert chat_client.state is ConnectionState.CONNECTED
+
+
+def test_connection_lost_during_user_disconnect_does_not_break_disconnect(
+        chat_client: ChatClient, server: FakeServer, event_queue: queue.Queue[Event]) -> None:
+    """Race: the user is disconnecting (DISCONNECTING) when the receiver thread sees the
+    connection drop. The receiver must leave the state alone, so disconnect() can finish
+    with DISCONNECTED(user) instead of raising InvalidStateError."""
+    connect(chat_client, event_queue, server.port, auto_reconnect=False)
+    chat_client._set_state(ConnectionState.DISCONNECTING)        # disconnect() has begun
+    chat_client._end_session(DisconnectReason.CONNECTION_LOST)    # receiver thread steps in
+    assert chat_client.state is ConnectionState.DISCONNECTING
+    chat_client._set_state(ConnectionState.DISCONNECTED)          # disconnect() finishes
+    assert chat_client.state is ConnectionState.DISCONNECTED
