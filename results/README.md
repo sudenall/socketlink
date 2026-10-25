@@ -15,8 +15,10 @@ Each run sends 50 messages for every combination of simulated packet loss (0 %, 
 lost its connection or did not finish within the time limit is counted in `failed_runs`
 and is not part of the means.
 
-The CSV reports the mean and sample standard deviation across five runs for duration and
-retransmissions.
+The CSV reports the mean and sample standard deviation over `runs` completed runs (five per
+setting) for duration and retransmissions. A run that fails (connection closed or time
+limit exceeded) is repeated and counted in `failed_runs`; it is not part of the means, so
+the number of attempts for a setting is `runs + failed_runs`.
 
 | Environment | Value |
 |---|---|
