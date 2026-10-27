@@ -193,6 +193,7 @@ python run_server.py      # sunucu dashboard'u
 python run_client.py      # bir client penceresi — birden fazla kullanıcı için birkaç kez aç
 ```
 - Aynı bilgisayarda test: client'ta host `127.0.0.1`, port `5050`.
+- **Port meşgulse:** Windows'ta bazı sistem servisleri UDP 5050'yi tutabilir; server `WinError 10048` ("Port 5050 could not be opened") verirse server ve client'larda **aynı** başka bir port seç (örn. `5051`).
 - Farklı bilgisayarlar (aynı Wi-Fi): sunucu bind host `0.0.0.0`; client'lar sunucunun yerel IP'sini girer (Windows `ipconfig`, macOS/Linux `ipconfig getifaddr en0` / `ip addr`).
 - Okul/yurt ağları genelde cihazlar arası trafiği engeller; uzaktan ortak test için herkes **kendi bilgisayarında localhost** ile çalışır, entegrasyon demosu ekran paylaşımıyla yapılır.
 
@@ -208,6 +209,7 @@ All commands must be executed from the **repository root directory** with the vi
    - Configure Bind Host (`0.0.0.0` for LAN access, `127.0.0.1` for local loopback) and Port (`5050`).
    - Select transport protocol: **TCP** or **Reliable UDP** (Go-Back-N ARQ).
    - Click **Start** to listen for incoming client connections.
+   - If the port is busy (for example, a Windows system service can hold UDP 5050 and the server reports `WinError 10048`), choose another port such as `5051` in the server dashboard and in every client.
    - *Standalone Server Demo Mode:* `python run_server.py --demo` runs an interactive simulation generating mock clients, traffic, and loss events without opening physical sockets.
 
 2. **Launch Client Instance(s):**
